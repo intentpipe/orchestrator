@@ -16,10 +16,10 @@ same way it does transcribe.sh.
 Run:  system-scripts/status.py                 # report on every project
       system-scripts/status.py <workspace>     # report on just that one project
 """
+import http.client
 import json
 import os
 import re
-import socket
 import subprocess
 
 ORCH_HOME = os.environ.get("ORCH_HOME", os.path.expanduser("~/.agent-orchestrator"))
@@ -87,19 +87,42 @@ def _branch(repo):
     return f"{br}{'*' if dirty else ''}"
 
 
-def _listening(port):
+def _probe(port, path="/"):
+    """HTTP GET 127.0.0.1:<port><path>. Returns (state, http_code):
+      'up'       — got an HTTP response < 500 (serving; 404/401 still count)
+      'erroring' — got an HTTP response >= 500, or a bound port that isn't HTTP
+                   (a hung dev server that 500s reads as erroring, not up)
+      'down'     — nothing accepting the connection
+    A plain TCP check can't tell 'up' from 'erroring' — that gap is why a broken
+    service showed a false 🟢."""
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.4):
-            return True
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        try:
+            conn.request("GET", path)
+            code = conn.getresponse().status
+        finally:
+            conn.close()
+        return ("erroring", code) if code >= 500 else ("up", code)
     except OSError:
-        return False
+        return ("down", None)
+    except Exception:  # connected, but not speaking HTTP
+        return ("erroring", None)
+
+
+_ICON = {"up": "🟢", "erroring": "🟠", "down": "🔴"}
 
 
 def _svc(ports, key):
-    port = ports.get(key)
+    """One service line. `ports[key]` is either a bare port int or
+    {"port": int, "health": "/path"}."""
+    spec = ports.get(key)
+    port = spec.get("port") if isinstance(spec, dict) else spec
     if not port:
         return f"{key}: n/a"
-    return f"{key}: {'🟢' if _listening(port) else '🔴'} :{port}"
+    path = spec.get("health", "/") if isinstance(spec, dict) else "/"
+    state, code = _probe(port, path)
+    tail = f":{port} ({code})" if state == "erroring" and code else f":{port}"
+    return f"{key}: {_ICON[state]} {tail}"
 
 
 def build_report(only_workspace=None):

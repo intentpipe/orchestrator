@@ -77,6 +77,17 @@ assert "alpha" in full and "beta" in full, full
 one = status.build_report(a)
 assert "alpha" in one and "beta" not in one, one
 assert "No project registered" in status.build_report("/nope")
+
+# _svc maps probe state -> icon. The regression this guards: a bound-but-500
+# service must NOT read as up (that false 🟢 is what hid a broken frontend).
+status._probe = lambda port, path="/": ("up", 200)
+assert "🟢" in status._svc({"backend": 8810}, "backend")
+status._probe = lambda port, path="/": ("erroring", 500)
+line = status._svc({"frontend": {"port": 3031, "health": "/"}}, "frontend")
+assert "🟠" in line and "(500)" in line, line
+status._probe = lambda port, path="/": ("down", None)
+assert "🔴" in status._svc({"backend": 8810}, "backend")
+assert status._svc({}, "backend") == "backend: n/a"
 PY
 echo "[smoke] status.py ok"
 

@@ -1,5 +1,11 @@
 {
-  "_comment": "Per-project host ports the status collector probes to decide FE/BE up/down. Keyed by the project name in the daemon registry (registry.json). Source of truth for the numbers is projects/PORTS.md — keep them in sync when you add or move a service.",
-  "careybo": { "backend": 8810, "frontend": 3031 },
-  "tell-your-friends": { "backend": 8800, "frontend": 3030 }
+  "_comment": "Per-project services the status collector HTTP-probes to decide FE/BE state (🟢 serving / 🟠 bound-but-erroring / 🔴 down). Keyed by the project name in the daemon registry. Each service is {port, health-path}; a bare int also works (path defaults to /). Port numbers are single-sourced from projects/PORTS.md — keep them in sync when you add or move a service.",
+  "careybo": {
+    "backend": { "port": 8810, "health": "/health" },
+    "frontend": { "port": 3031, "health": "/" }
+  },
+  "tell-your-friends": {
+    "backend": { "port": 8800, "health": "/health" },
+    "frontend": { "port": 3030, "health": "/" }
+  }
 }

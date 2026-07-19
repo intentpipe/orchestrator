@@ -70,7 +70,8 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
    grammar? No — the scaffold already accepts human notes of any shape in `scaffold/updates/` and `/plan`
    turns them into tasks (DESIGN #13/#26). A transcript is just such a note. Reusing it means voice control inherits the
    existing plan-approval gate and `Intent:`-note rework tracking for free; no parallel intake to drift.
-2. **The plan-approval gate becomes a reply, not a bypass.** *Objection:* async voice tempts auto-plan-and-
+2. **The plan-approval gate becomes a reply, not a bypass.** *(Superseded by #10: the 🚀 trigger is the
+   approval; no pending state.)* *Objection:* async voice tempts auto-plan-and-
    build. But the approved plan is the human's contract with the pipeline (DESIGN #13/#26) — so the orchestrator replies
    with the planned task list and waits for an "approve"/"go" message before launching `loop.sh`.
    Per-topic pending-approval state in the daemon; cheap, and keeps the one human gate that matters.
@@ -97,12 +98,24 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
    (deterministic), so it stays a script — but as orchestrator-layer code it isn't bound by the plugin's
    bash convention. Pick whichever keeps it one readable file (leaning Python for the JSON/state handling).
 9. **Approval is one knob, defaulting on: `APPROVAL_MODE=required|auto` (per-project, in agents.env).**
+   *(Superseded by #10: sending 🚀 after reading the plan is `required`; sending it immediately is `auto` — no knob.)*
    *Objection:* async voice control eventually wants zero-friction "just build it" for trusted projects — will
    that be a rewrite? No. `required` (default) parks in per-topic pending-state and waits for an "approve"
    reply before launching `loop.sh`; `auto` launches immediately. Both **still post the transcript + plan to
    the topic** and both leave `verify.sh` as the merge gate — `auto` drops the human plan gate, never the
    legibility or the deterministic gate. It's one branch in the daemon, so a mature project can run `auto`
    while a new/risky one stays `required`. Setting it per-project (not global) is what makes the mix cheap.
+10. **Deterministic tokens realize Phase 3's control; 🚀 is the approval (proposal 2026-07-19).** Exact-match
+   tokens in a registered topic — 🧠/`plan` → detached headless `/machines-at-work:plan`, 🚀/`build-all` →
+   detached `loop.sh` (located via `MAW_SCRIPTS` in telegram.env) — instead of the planned `claude -p` router:
+   four fixed tokens are mechanics, not judgment, so the router stays unbuilt until a message genuinely needs
+   interpretation. Sending 🚀 after reading the posted plan *is* the approval, which supersedes #2's
+   pending-approval state and #9's `APPROVAL_MODE` knob; the daemon stays stateless across messages (pidfiles
+   under `$ORCH_HOME/run/` guard double-launch and survive restarts). Every allow-listed message gets a
+   reaction lifecycle — 👀 received → 👌 queued/started, or 😱 + a reply naming the failure (bots may only
+   use Telegram's fixed reaction set, hence not ✅/⚠️; strangers get no reaction at all, per #4). Same
+   change: raw messages now land in `updates/.inbox/<epoch>-<msgid>.md` per machines-at-work 0.15.0's
+   `inbound.sh` contract — the daemon no longer names or formats notes, ending the drift where it did.
 
 ## Phased build (each phase independently verifiable)
 - **Phase 1 — outbound leg (in-plugin, smallest, low-risk).** Extend `notify.sh`: creds set → `sendMessage`

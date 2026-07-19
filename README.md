@@ -60,6 +60,22 @@ reads two things: the daemon **registry** for which projects exist + their works
 `register`ed project appears automatically), and `system-scripts/ports.json` for the FE/BE ports to
 probe. Keep `ports.json` in sync with `projects/PORTS.md` when you add or move a service.
 
+## Topic triggers: 🧠 plan · 🚀 build-all
+
+In a **registered project topic**, a message that is exactly one of these tokens drives the
+pipeline instead of becoming a note (exact match only — "let's plan later" is still a note):
+
+| token | action |
+|---|---|
+| 🧠 or `plan` | headless `/machines-at-work:plan` in the workspace — drains queued notes, posts the task list back into the topic |
+| 🚀 or `build-all` | detached `loop.sh` — set `MAW_SCRIPTS=` in `telegram.env` to the plugin's `scripts/` dir |
+
+🚀 is the plan approval: text intent → 🧠 → read the posted plan → 🚀. A second trigger while
+one is running replies "already running" (pidfiles + child logs under `~/.agent-orchestrator/run/`).
+
+Every message you send gets a reaction: 👀 processing, then 👌 queued/started, or 😱 plus a reply
+saying what went wrong. (Telegram bots can only react from a fixed emoji set — no ✅/⚠️.)
+
 ## `system-scripts/`
 
 Server-wide, cross-project tooling that isn't the Telegram bridge itself. Today: the `status`

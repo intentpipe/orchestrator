@@ -94,7 +94,9 @@ class TelegramAPI:
             return json.load(r)
 
     def get_updates(self, offset, timeout=30):
-        r = self._call("getUpdates", {"offset": offset, "timeout": timeout}, timeout=timeout + 15)
+        # read timeout must clear the long-poll window with margin for network latency
+        # spikes; a tight +15 buffer logged ~1 spurious "read timed out" per hour.
+        r = self._call("getUpdates", {"offset": offset, "timeout": timeout}, timeout=timeout + 30)
         return r.get("result", [])
 
     def send_message(self, chat_id, text, thread_id=None):

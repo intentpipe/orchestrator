@@ -3,6 +3,7 @@
 # Reads TELEGRAM_BOT_TOKEN from the env or ~/.agent-orchestrator/telegram.env.
 #   tg.sh chat-id                     # discover the id of the group the bot can see
 #   tg.sh new-topic <name> [chat_id]  # create a forum topic, print its thread id
+#   tg.sh rename-topic <thread_id> <new-name> [chat_id]  # rename an existing topic
 #   tg.sh register <name> <scaffold-dir>  # new-topic + map it to a workspace (inbound)
 #                                           and point that workspace's notify.sh at it
 set -euo pipefail
@@ -34,6 +35,21 @@ r=json.load(sys.stdin)
 if not r.get("ok"): sys.exit("createForumTopic failed: "+json.dumps(r))
 print(r["result"]["message_thread_id"])'
     ;;
+  rename-topic)
+    # Rename an existing forum topic (e.g. after a project is renamed). The
+    # thread id doesn't change, so the registry mapping still holds — only the
+    # Telegram-side title moves. Idempotent: renaming to the same name is a no-op.
+    tid="${2:?usage: tg.sh rename-topic <thread_id> <new-name> [chat_id]}"
+    name="${3:?usage: tg.sh rename-topic <thread_id> <new-name> [chat_id]}"
+    chat="${4:-${TELEGRAM_CHAT_ID:?set TELEGRAM_CHAT_ID (env/file) or pass chat_id}}"
+    curl -fsS "$api/editForumTopic" \
+      --data-urlencode "chat_id=$chat" \
+      --data-urlencode "message_thread_id=$tid" \
+      --data-urlencode "name=$name" | python3 -c 'import json,sys
+r=json.load(sys.stdin)
+if not r.get("ok"): sys.exit("editForumTopic failed: "+json.dumps(r))
+print("renamed")'
+    ;;
   register)
     # Hand-register one project (proposal Phase 2): create its topic, map the
     # topic → workspace in the registry (inbound daemon reads this), and wire the
@@ -62,5 +78,5 @@ PY
     echo "registered '$name' → topic $tid → $ws"
     ;;
   *)
-    echo "usage: tg.sh {chat-id | new-topic <name> [chat_id] | register <name> <scaffold-dir>}" >&2; exit 2 ;;
+    echo "usage: tg.sh {chat-id | new-topic <name> [chat_id] | rename-topic <thread_id> <new-name> [chat_id] | register <name> <scaffold-dir>}" >&2; exit 2 ;;
 esac

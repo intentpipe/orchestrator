@@ -16,11 +16,29 @@ never the daemon. Every allow-listed message gets a reaction lifecycle:
 
 Keyword `status` short-circuits routing and replies with a live report
 (branches + FE/BE up/down) from system-scripts/status.py: scoped to the one
-project when sent in its topic, all projects when sent anywhere else.
+project when sent in its topic, all projects when sent anywhere else. Keyword
+`pull-all` likewise short-circuits: system-scripts/pull.py fast-forward-pulls the
+whole fleet (every project's repos + the machines-at-work scaffold via
+MAW_SCRIPTS), skipping any dirty tree, and replies with a per-repo result.
+Keyword `help` short-circuits the same way, replying with the full command list.
+
+Keyword `checkout` (in a project topic) posts that project's checkout options —
+the default-branch baseline plus one per open-PR feature branch (repos without a
+PR on that branch stay on the default; that's the frontend/backend-only case) —
+one Telegram message each, remembered by message_id. A message_reaction on one of
+those messages (allow-listed user) checks its branches out and relaunches the
+preview stack, which posts the fresh frontend URL. Receiving reactions needs the
+bot to be a chat admin and `message_reaction` in getUpdates' allowed_updates.
+
+In the General topic (no registered workspace) a message that isn't `status` is
+treated as a free-form instruction (Decision #11): transcribe if voice, then run
+a one-shot `claude -p` in GENERAL_WORKSPACE and post its output back. This is the
+one interpretation path — everything else in this daemon stays deterministic.
 
 Config (all under $ORCH_HOME, default ~/.agent-orchestrator):
   telegram.env   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALLOWLIST (space/comma ids),
-                 MAW_SCRIPTS (path to the machines-at-work plugin's scripts/, for 🚀)
+                 MAW_SCRIPTS (path to the machines-at-work plugin's scripts/, for 🚀),
+                 GENERAL_WORKSPACE (cwd for a General-topic `claude -p`)
   registry.json  {"<thread_id>": {"name": ..., "workspace": "/abs/scaffold-dir"}}
   offset         last processed update_id (persisted, so restarts don't replay)
   run/           <name>.{plan,loop}.{pid,log} — double-launch guard + child logs
@@ -44,10 +62,44 @@ OFFSET_FILE = os.path.join(ORCH_HOME, "offset")
 RUN_DIR = os.path.join(ORCH_HOME, "run")
 TRANSCRIBE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcribe.sh")
 STATUS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "status.py")
+PULL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "pull.py")
+CHECKOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "checkout.py")
+# message_id → offer map for `checkout`: reacting to an offer message triggers its
+# build. Persisted so an offer survives the restart between posting and reacting.
+OFFERS_FILE = os.path.join(RUN_DIR, "checkout_offers.json")
+OFFERS_KEEP = 60  # cap the map so it can't grow without bound
+
+# Ceiling for a General `claude -p` run. It parks the poll loop meanwhile (same
+# synchronous-subprocess shape as status_report), so keep it bounded.
+CLAUDE_TIMEOUT = 300
 
 # Exact-match trigger tokens (Decision #10). Matching is on the stripped,
 # case-folded message text — "plan" inside a sentence never fires.
 TRIGGERS = {"🧠": "plan", "plan": "plan", "🚀": "loop", "build-all": "loop"}
+
+# Human-facing command list for the `help` keyword. Hand-synced with the keyword
+# short-circuits in _route and the TRIGGERS table above — the daemon's whole
+# command surface is small and deterministic, so one readable block covers it.
+HELP = (
+    "🤖 Orchestrator commands\n"
+    "\n"
+    "Any topic:\n"
+    "• status — live fleet report: git branch + FE/BE up/down. In a project "
+    "topic it scopes to that project; elsewhere it covers every project.\n"
+    "• pull-all — fast-forward-pull every repo in the fleet (and the "
+    "machines-at-work plugin); dirty trees are skipped, never clobbered.\n"
+    "• help — this message.\n"
+    "\n"
+    "In a project topic:\n"
+    "• 🧠 or plan — plan the queued notes (headless /machines-at-work:plan).\n"
+    "• 🚀 or build-all — run the build loop (loop.sh, detached).\n"
+    "• checkout — post the checkout options (default branch + each open-PR "
+    "state); react to one to check it out, rebuild, and get the frontend URL.\n"
+    "• anything else (text or voice) — dropped as an intent note for the next plan.\n"
+    "\n"
+    "In the General topic:\n"
+    "• anything (text or voice) — answered by a one-shot claude run."
+)
 
 
 def log(msg):
@@ -96,7 +148,13 @@ class TelegramAPI:
     def get_updates(self, offset, timeout=30):
         # read timeout must clear the long-poll window with margin for network latency
         # spikes; a tight +15 buffer logged ~1 spurious "read timed out" per hour.
-        r = self._call("getUpdates", {"offset": offset, "timeout": timeout}, timeout=timeout + 30)
+        # allowed_updates must be explicit: `message_reaction` is OFF by default, and
+        # naming it drops the default set — so `message` has to be listed too. (The
+        # bot must also be a chat admin for Telegram to deliver reaction updates.)
+        r = self._call("getUpdates", {
+            "offset": offset, "timeout": timeout,
+            "allowed_updates": json.dumps(["message", "message_reaction"]),
+        }, timeout=timeout + 30)
         return r.get("result", [])
 
     def send_message(self, chat_id, text, thread_id=None):
@@ -136,6 +194,180 @@ def status_report(workspace=None):
     if out.returncode != 0:
         return f"⚠️ status failed: {out.stderr.strip() or 'unknown error'}"
     return out.stdout.strip() or "(no status)"
+
+
+def instruction_text(msg, api, cfg, thread_id):
+    """(kind, text) for a message: transcribe voice — quoting the transcript back
+    into the topic so a mis-hear is visible before it's acted on — or take raw
+    text. Raises ValueError on an empty transcript or an unsupported type. Shared
+    by the note-drop path (registered topic) and the `claude -p` path (General)."""
+    if "voice" in msg:
+        fd, dest = tempfile.mkstemp(suffix=".oga")
+        os.close(fd)
+        try:
+            api.download_voice(msg["voice"]["file_id"], dest)
+            text = transcribe(dest)
+        finally:
+            if os.path.exists(dest):
+                os.remove(dest)
+        if not text:
+            raise ValueError("could not transcribe that voice note")
+        api.send_message(cfg["chat_id"], f"🎙 > {text}", thread_id)
+        return "voice", text
+    if "text" in msg:
+        return "text", msg["text"]
+    raise ValueError("only voice notes and text are supported")
+
+
+def run_general(prompt, cwd):
+    """One-shot `claude -p` in cwd; its stdout becomes the Telegram reply, trimmed
+    to Telegram's ~4096-char message ceiling. --dangerously-skip-permissions: no
+    TTY exists to answer permission prompts, and the allowlist (Decision #4) is
+    already the whole boundary for the loop.sh the daemon spawns on 🚀."""
+    out = subprocess.run(["claude", "-p", prompt, "--dangerously-skip-permissions"],
+                         cwd=cwd, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT)
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip() or f"claude exited {out.returncode}")
+    reply = out.stdout.strip() or "(claude returned no output)"
+    return reply if len(reply) <= 3900 else reply[:3900] + "\n…(truncated)"
+
+
+def general(msg, cfg, api, thread_id, react, fail):
+    """A General-topic message that isn't `status`: treat it as a free-form
+    instruction and answer it with a one-shot `claude -p` in GENERAL_WORKSPACE.
+    This is the daemon's only interpretation path — the deferred Phase-3 router
+    (Decision #10), scoped to General so registered topics stay note-drop.
+
+    Synchronous like status_report: a slow run briefly parks the poll loop —
+    acceptable for one user. The upgrade path (spawn detached, post back via the
+    bot API like a project's notify.sh) needs no new door. cwd is pinned to the
+    projects dir, not the daemon's home — a sensible default, not a sandbox."""
+    cwd = cfg.get("general_workspace")
+    if not cwd:
+        return fail("skip: GENERAL_WORKSPACE unset",
+                    "GENERAL_WORKSPACE isn't set in telegram.env — nothing to run claude against")
+    if not os.path.isdir(cwd):
+        return fail(f"skip: GENERAL_WORKSPACE {cwd} missing", f"GENERAL_WORKSPACE is missing: {cwd}")
+    try:
+        kind, text = instruction_text(msg, api, cfg, thread_id)
+    except ValueError as e:
+        return fail(f"skip: {e}", str(e))
+    try:
+        reply = run_general(text, cwd)
+    except subprocess.TimeoutExpired:
+        return fail(f"claude -p timed out after {CLAUDE_TIMEOUT}s", "that took too long and was stopped")
+    except Exception as e:
+        return fail(f"error: claude -p failed: {e}", f"claude failed: {e}")
+    api.send_message(cfg["chat_id"], reply, thread_id)
+    react("👌")
+    return f"general {kind} → claude -p ({len(text)} chars in, {len(reply)} out)"
+
+
+def pull_report(maw_scripts=None):
+    """Fast-forward-pull the whole fleet (registry repos + the machines-at-work
+    scaffold when MAW_SCRIPTS is set); pull.py's stdout is the Telegram reply.
+    Synchronous like status_report — parks the poll loop while pulling, bounded by
+    the timeout. --repo takes any path inside the scaffold repo; pull.py resolves
+    it to the repo root, so passing MAW_SCRIPTS (its scripts/ dir) is enough."""
+    cmd = [sys.executable, PULL] + (["--repo", maw_scripts] if maw_scripts else [])
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if out.returncode != 0:
+        return f"⚠️ pull-all failed: {out.stderr.strip() or 'unknown error'}"
+    return out.stdout.strip() or "(no repos)"
+
+
+def load_offers():
+    try:
+        return json.load(open(OFFERS_FILE))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_offers(offers):
+    """Persist the message_id→offer map, newest-capped so it can't grow forever."""
+    if len(offers) > OFFERS_KEEP:  # dict preserves insertion order → drop the oldest
+        offers = dict(list(offers.items())[-OFFERS_KEEP:])
+    os.makedirs(RUN_DIR, exist_ok=True)
+    tmp = OFFERS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(offers, f)
+    os.replace(tmp, OFFERS_FILE)
+
+
+def checkout_options(workspace):
+    """checkout.py --json for one project → its options dict. Raises on failure."""
+    out = subprocess.run([sys.executable, CHECKOUT, "--json", workspace],
+                         capture_output=True, text=True, timeout=90)
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip() or "checkout enumeration failed")
+    return json.loads(out.stdout)
+
+
+def offer_checkout(entry, cfg, api, thread_id, react, fail):
+    """`checkout` in a project topic: post one message per checkout option and
+    remember each message_id → option, so reacting to one triggers its build.
+
+    An option is a branch-per-repo state: the baseline (all repos on the default
+    branch) plus one per open-PR feature branch, with repos that have no PR on
+    that branch left on the default (the frontend/backend-only rule)."""
+    try:
+        data = checkout_options(entry["workspace"])
+    except Exception as e:
+        return fail(f"error: checkout enumeration failed: {e}", f"couldn't list checkout options: {e}")
+
+    options = data["options"]
+    api.send_message(cfg["chat_id"],
+                     f"🔀 checkout · {data['name']} — react to an option to check it "
+                     f"out, build it, and get the frontend URL:", thread_id)
+    offers = load_offers()
+    for opt in options:
+        body = f"[{opt['label']}]\n" + "\n".join(f"• {r}: {br}" for r, br in opt["branches"].items())
+        for pr in opt["prs"]:
+            body += f"\n    ↳ {pr['repo']} PR #{pr['number']}: {pr['title']}"
+        resp = api.send_message(cfg["chat_id"], body, thread_id)
+        mid = (resp or {}).get("result", {}).get("message_id")
+        if mid is not None:
+            offers[str(mid)] = {"name": data["name"], "workspace": entry["workspace"],
+                                "topic": thread_id, "label": opt["label"],
+                                "branches": opt["branches"]}
+    save_offers(offers)
+    react("👌")
+    return f"checkout offered for {entry['name']} ({len(options)} option(s))"
+
+
+def build_checkout(offer):
+    """Detached: check out an offer's branches per repo, then relaunch (which posts
+    the frontend URL to the project's topic). Runs via `checkout.py --build`."""
+    fd, path = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(offer, f)
+    return spawn_detached([sys.executable, CHECKOUT, "--build", path], os.path.dirname(CHECKOUT),
+                          f"{offer['name']}.checkout")
+
+
+def process_reaction(r, cfg, api):
+    """Handle a message_reaction update. Only an allow-listed user's *added*
+    reaction on a remembered checkout-offer message does anything — it checks out
+    that option and builds it. Every other reaction is ignored (same silence a
+    non-allow-listed message gets: probing the bot must teach nothing)."""
+    user = str(r.get("user", {}).get("id", ""))
+    if user not in cfg["allowlist"]:
+        return f"drop reaction: user {user or '?'} not allow-listed"
+    if not r.get("new_reaction"):
+        return "reaction removed, ignored"
+    mid = str(r.get("message_id"))
+    offer = load_offers().get(mid)
+    if not offer:
+        return f"reaction on non-offer message {mid}, ignored"
+    base = os.path.join(RUN_DIR, f"{offer['name']}.checkout.pid")
+    if pid_alive(base):
+        api.send_message(cfg["chat_id"], f"⏳ {offer['name']} is already building — hang on.", offer["topic"])
+        return f"skip: checkout build already running for {offer['name']}"
+    pid = build_checkout(offer)
+    api.send_message(cfg["chat_id"],
+                     f"👌 checking out [{offer['label']}] and rebuilding {offer['name']} — "
+                     f"the frontend URL will follow.", offer["topic"])
+    return f"checkout+build started for {offer['name']} [{offer['label']}] (pid {pid})"
 
 
 def write_inbox(workspace, text, msg):
@@ -239,37 +471,43 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
         react("👌")
         return f"status report sent ({entry['name'] if entry else 'all'})"
 
+    # `pull-all`: fleet-wide, so it short-circuits routing like `status` and works
+    # in any topic. Includes the machines-at-work scaffold (MAW_SCRIPTS), which
+    # lives outside every project workspace. Never writes a note.
+    if stripped in ("pull-all", "pull all"):
+        api.send_message(cfg["chat_id"], pull_report(cfg.get("maw_scripts")), thread_id)
+        react("👌")
+        return "pull-all done"
+
+    # `help`: list every command. Short-circuits routing like `status` — works in
+    # any topic and never writes a note.
+    if stripped in ("help", "/help"):
+        api.send_message(cfg["chat_id"], HELP, thread_id)
+        react("👌")
+        return "help sent"
+
     if not entry:
-        return fail(f"skip: no workspace registered for topic {thread_id}",
-                    "this topic isn't registered to a project")
+        # General (or any unregistered topic): not a command, so treat the
+        # message as a free-form instruction and answer it with `claude -p`.
+        return general(msg, cfg, api, thread_id, react, fail)
     workspace = entry["workspace"]
     if not os.path.isdir(workspace):
         return fail(f"skip: workspace {workspace} missing (registry drift)",
                     f"registered workspace is missing: {workspace}")
 
+    # `checkout`: post the project's checkout options (branch-per-repo states) so
+    # reacting to one builds it. Project-scoped — it needs this topic's repos.
+    if stripped == "checkout":
+        return offer_checkout(entry, cfg, api, thread_id, react, fail)
+
     action = TRIGGERS.get(stripped)
     if action:
         return dispatch(action, entry, cfg, api, thread_id, react, fail)
 
-    if "voice" in msg:
-        kind = "voice"
-        fd, dest = tempfile.mkstemp(suffix=".oga")
-        os.close(fd)
-        try:
-            api.download_voice(msg["voice"]["file_id"], dest)
-            text = transcribe(dest)
-        finally:
-            if os.path.exists(dest):
-                os.remove(dest)
-        if not text:
-            return fail("voice: empty transcript", "could not transcribe that voice note")
-        # quote the transcript back: the reaction says "queued", the quote is
-        # the only way to catch a mis-transcription before it becomes a task
-        api.send_message(cfg["chat_id"], f"🎙 > {text}", thread_id)
-    elif "text" in msg:
-        kind, text = "text", msg["text"]
-    else:
-        return fail("skip: unsupported message type", "only voice notes and text are supported")
+    try:
+        kind, text = instruction_text(msg, api, cfg, thread_id)
+    except ValueError as e:
+        return fail(f"skip: {e}", str(e))
 
     name = write_inbox(workspace, text, msg)
     react("👌")
@@ -286,7 +524,8 @@ def build_config(env):
                  "security model (Decision #4); add ALLOWLIST=<your telegram user id> "
                  f"to {ENV_FILE}.")
     return {"token": token, "chat_id": env.get("TELEGRAM_CHAT_ID"),
-            "allowlist": allowlist, "maw_scripts": env.get("MAW_SCRIPTS")}
+            "allowlist": allowlist, "maw_scripts": env.get("MAW_SCRIPTS"),
+            "general_workspace": env.get("GENERAL_WORKSPACE")}
 
 
 def run(once=False):
@@ -304,12 +543,18 @@ def run(once=False):
         for u in updates:
             offset = u["update_id"] + 1
             msg = u.get("message")
+            reaction = u.get("message_reaction")
             if msg:
                 try:
                     # reload registry per message: a newly-registered topic works without a restart
                     log(process_message(msg, cfg, load_registry(), api))
                 except Exception as e:
                     log(f"error on update {u['update_id']}: {e}")
+            elif reaction:
+                try:
+                    log(process_reaction(reaction, cfg, api))
+                except Exception as e:
+                    log(f"error on reaction update {u['update_id']}: {e}")
             write_offset(offset)
         if once:
             return

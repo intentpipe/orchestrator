@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# relaunch — orchestrator-level "fresh restart" for registered projects.
+#
+# For each registered project (or just the one named on the CLI) this:
+#   1. tears the whole preview stack DOWN   (docker containers + flutter + tunnels)
+#   2. brings it back UP FRESH              (containers recreated, frontend
+#                                            recompiled, brand-new cloudflared tunnels)
+#   3. POSTS the live frontend URL into that project's Telegram forum topic
+#
+# The per-project mechanics live in each project's own <name>-dev.sh (down/up/urls);
+# relaunch only orchestrates them and routes the resulting URL to the right channel.
+# Topic id + workspace come from the registry — the single source of truth.
+#
+# Usage:  relaunch [project-name]      # no arg = every registered project
+set -uo pipefail
+
+ORCH_HOME="${AGENT_ORCH_HOME:-$HOME/.agent-orchestrator}"
+REGISTRY="$ORCH_HOME/registry.json"
+ENV_FILE="$ORCH_HOME/telegram.env"
+FILTER="${1:-}"
+
+[ -f "$REGISTRY" ] || { echo "relaunch: no registry at $REGISTRY" >&2; exit 1; }
+
+# Telegram creds (chat id + bot token) for posting; the per-project topic id is
+# read from the registry below. All optional — missing creds means "print only".
+# shellcheck disable=SC1090
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+post() { # topic_id text
+  local topic="$1" text="$2"
+  echo "[relaunch] -> topic $topic: $text"
+  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+    echo "[relaunch] (no telegram creds; printed only)"; return
+  fi
+  curl -fsS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+    --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+    --data-urlencode "message_thread_id=$topic" \
+    --data-urlencode "text=$text" >/dev/null \
+    || echo "[relaunch] telegram send failed for topic $topic" >&2
+}
+
+# Emit "topic<TAB>name<TAB>workspace" rows from the registry (optionally filtered).
+rows() {
+  python3 - "$REGISTRY" "$FILTER" <<'PY'
+import json, sys
+reg = json.load(open(sys.argv[1]))
+flt = sys.argv[2]
+for topic, e in reg.items():
+    if flt and e.get("name") != flt:
+        continue
+    print(f"{topic}\t{e['name']}\t{e['workspace']}")
+PY
+}
+
+any=0
+while IFS=$'\t' read -r topic name workspace; do
+  any=1
+  root="$(dirname "$workspace")"                       # workspace = <root>/machines-at-work
+  dev="$(ls "$root"/*-dev.sh 2>/dev/null | head -1)"
+  echo "=============================================================="
+  echo "[relaunch] $name  (topic $topic, root $root)"
+  if [ -z "$dev" ]; then
+    echo "[relaunch] no *-dev.sh in $root — skipping"
+    post "$topic" "⚠️ $name: no dev script found, cannot relaunch."
+    continue
+  fi
+
+  echo "[relaunch] down ..."
+  ( cd "$root" && bash "$dev" down ) || echo "[relaunch] down reported errors (continuing)"
+
+  # The dev scripts stop the flutter *wrapper* pid, but the web server runs as a
+  # forked child that survives `down` and keeps squatting its port — which then
+  # blocks the fresh build from binding (and leaves a stale build serving). Free
+  # the frontend port explicitly. Port is discovered from the dev script itself.
+  fport="$(grep -oE 'web-port[= "]+[0-9]+|FRONTEND_PORT=[0-9]+' "$dev" | grep -oE '[0-9]+' | head -1)"
+  if [ -n "$fport" ]; then
+    for p in $(ss -tlnpH "sport = :$fport" 2>/dev/null | grep -oE 'pid=[0-9]+' | grep -oE '[0-9]+' | sort -u); do
+      echo "[relaunch] freeing stale listener on :$fport (kill $p)"; kill "$p" 2>/dev/null || true
+    done
+    sleep 1
+  fi
+
+  echo "[relaunch] up (fresh build) ..."
+  # Redirect to a FILE, never $(...): `up` launches long-lived flutter and
+  # cloudflared in the background, and command substitution would block on their
+  # still-open pipe forever. A file redirect returns as soon as cmd_up finishes;
+  # `timeout` is only a backstop in case a dev script itself wedges.
+  uplog="$(mktemp)"
+  timeout 180 bash -c 'cd "$1" && bash "$2" up' _ "$root" "$dev" >"$uplog" 2>&1 \
+    || echo "[relaunch] up did not exit cleanly (see below)"
+  cat "$uplog"
+
+  # Both dev scripts print a "(Flutter web) : <url>" line via their urls command.
+  url="$(grep -i '(Flutter web)' "$uplog" | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -1)"
+  rm -f "$uplog"
+
+  if [ -z "$url" ]; then
+    echo "[relaunch] WARNING: no frontend URL captured for $name" >&2
+    post "$topic" "⚠️ $name relaunched but the frontend URL wasn't captured — check the server."
+    continue
+  fi
+  echo "[relaunch] $name frontend: $url"
+  post "$topic" "🚀 $name relaunched — frontend is live: $url"
+done < <(rows)
+
+[ "$any" = 1 ] || { echo "relaunch: no matching project${FILTER:+ \"$FILTER\"}" >&2; exit 1; }
+echo "[relaunch] done."

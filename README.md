@@ -46,7 +46,7 @@ frontend ports are listening:
 ```
 📊 Project status
 
-• careybo
+• bibbles
    branches: backend main*, frontend main*
    running:  backend: 🟢 :8810 · frontend: 🟢 :3031
 • tell-your-friends
@@ -59,6 +59,30 @@ It short-circuits before topic routing, so it never writes an update note. Imple
 reads two things: the daemon **registry** for which projects exist + their workspaces (so a newly
 `register`ed project appears automatically), and `system-scripts/ports.json` for the FE/BE ports to
 probe. Keep `ports.json` in sync with `projects/PORTS.md` when you add or move a service.
+
+## Keyword: `pull-all`
+
+Send `pull-all` (text) in **any** topic and the daemon fast-forward-pulls the whole
+fleet — every registered project's repos **and** the `machines-at-work` scaffold
+(resolved from `MAW_SCRIPTS`, since it lives outside every project workspace) — then
+replies with a per-repo result:
+
+```
+📥 pull-all
+
+• bibbles
+   backend main ✅ pulled
+   frontend main ✅ up to date
+• tell-your-friends
+   app-mobile dev ✅ pulled · core dev ⏭ skipped (dirty, 2 files) · scaffold dev ✅ up to date
+• machines-at-work main ✅ pulled
+```
+
+Guarded on purpose: a repo is pulled only if its tree is **clean** and the pull is a
+**fast-forward** — a dirty or diverged repo is reported and skipped, never clobbered
+(the same "don't touch dirty" rule `status` marks with `*`). Like `status` it short-
+circuits routing and writes no note. Implementation: `system-scripts/pull.py` (imports
+`status.py` for the fleet enumeration; pure stdlib; also runnable from the shell).
 
 ## Topic triggers: 🧠 plan · 🚀 build-all
 
@@ -76,7 +100,73 @@ one is running replies "already running" (pidfiles + child logs under `~/.agent-
 Every message you send gets a reaction: 👀 processing, then 👌 queued/started, or 😱 plus a reply
 saying what went wrong. (Telegram bots can only react from a fixed emoji set — no ✅/⚠️.)
 
+## Keyword: `checkout`
+
+Send `checkout` (text) in a **project topic** and the daemon posts that project's
+checkout options — one Telegram message each:
+
+- the **baseline**: every code repo on its `DEFAULT_BRANCH` (the merged mainline);
+- one option **per open-PR feature branch**. PRs are grouped across repos by head
+  branch, so a feature touching both repos is one option; a repo with no PR on that
+  branch stays on the default. That's the frontend/backend-only case — a
+  frontend-only PR leaves the backend on `dev`.
+
+**React to one of those messages** and the daemon checks its branches out in each
+repo (dirty trees are left untouched, never clobbered) and runs `relaunch`, which
+rebuilds the preview stack and posts the fresh **frontend URL** back into the topic.
+
+```
+🔀 checkout · tell-your-friends — react to an option to check it out, build it, and get the frontend URL:
+[dev (baseline)]
+• app_mobile: dev
+• core: dev
+[feat/onboarding]
+• app_mobile: feat/onboarding
+• core: dev
+    ↳ app_mobile PR #41: Onboarding flow
+```
+
+Enumeration is `system-scripts/checkout.py` (reuses `status.py` for the fleet
+walk; `gh` lists open PRs — a repo with no `gh`/origin just contributes no PR
+options). **Receiving reactions requires the bot to be a chat admin**, and the
+daemon requests `message_reaction` in `getUpdates`' `allowed_updates` (both are
+already wired). A reaction by a non-allow-listed user, a cleared reaction, or a
+reaction on any non-offer message does nothing.
+
+## Keyword: `help`
+
+Send `help` (or `/help`) in **any** topic and the daemon replies with the full
+command list — the keywords above, the topic triggers, and the General-topic
+behaviour. Short-circuits like `status`; never writes a note.
+
+## General topic: free-form → `claude -p`
+
+Registered topics map to a project; the **General** topic doesn't. A message there that isn't `status`
+is treated as a free-form instruction — the daemon's one interpretation path (everything else is
+deterministic). It transcribes voice, then runs a **one-shot** `claude -p` in `GENERAL_WORKSPACE` and
+posts the output back into General. Good for cross-project asks:
+
+> *"update all the projects to the latest main"* · *"write a script that shows the branches with open PRs"*
+
+```
+echo 'GENERAL_WORKSPACE=/home/you/projects' >> ~/.agent-orchestrator/telegram.env
+```
+
+If `GENERAL_WORKSPACE` is unset it fails loudly (😱 + a reply) rather than running claude against the
+daemon's home. Reaction lifecycle is the same as everywhere: 👀 → 👌, or 😱 + reason.
+
+**Deliberately bounded** (see Decision #11):
+- **One-shot, not a session.** The daemon is stateless across messages, so this is *fire a task, get one
+  result back* — not a conversation. If you find yourself wanting to iterate on an authored script over
+  several messages, that's the signal to SSH in / open Claude Code directly, not to bend this into a REPL.
+- **Synchronous.** A long run briefly parks the poll loop (same shape as `status`); fine for a single user.
+- **`--dangerously-skip-permissions`**, run in a pinned cwd. The cwd is a sensible default dir, **not** a
+  sandbox — the allowlist stays the whole security model, exactly as it is for the 🚀 loop.
+- **General only.** Registered project topics still note-drop / trigger; this never fires there.
+
 ## `system-scripts/`
 
-Server-wide, cross-project tooling that isn't the Telegram bridge itself. Today: the `status`
-collector. Anything the daemon exposes as a keyword-driven "report on the whole box" belongs here.
+Server-wide, cross-project tooling that isn't the Telegram bridge itself: the `status`
+collector, the `pull-all` fast-forward puller, and the `checkout` option enumerator/builder
+(all reuse `status.py`'s registry + agents.env + git walk). Anything the daemon exposes as a
+keyword-driven "act on the whole box" belongs here.

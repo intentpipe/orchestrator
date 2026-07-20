@@ -117,6 +117,36 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
    change: raw messages now land in `updates/.inbox/<epoch>-<msgid>.md` per machines-at-work 0.15.0's
    `inbound.sh` contract — the daemon no longer names or formats notes, ending the drift where it did.
 
+11. **General-topic messages are the one judgment path: free-form → `claude -p` (2026-07-20).** Decision #10
+    deferred the `claude -p` router "until a message genuinely needs interpretation." Requests like *"write a
+    script that shows the branches with open PRs"* or *"update the projects that are behind"* are that case:
+    open-ended, not reducible to a fixed token. So in the **General topic** (no registered workspace) a message
+    that isn't `status` is transcribed (if voice) and handed to a one-shot `claude -p` run in `GENERAL_WORKSPACE`,
+    whose stdout is posted back. *Objection:* doesn't this reopen the security surface #4 closed? No new *door* —
+    the allowlist still gates entry, exactly as it does for the `loop.sh` the daemon already spawns on 🚀 — but it
+    does widen what's *behind* the door from a bounded vocabulary to arbitrary agent execution, so it is
+    deliberately scoped to General (registered topics stay note-drop) and run with a pinned cwd (the projects dir,
+    not the daemon's home). *Boundaries kept small on purpose:* (a) **one-shot, not a session** — the daemon is
+    stateless across messages (#10); iterating on an authored script over several messages is *not* supported and
+    is the signal to SSH in / open Claude Code directly, not to grow a REPL the daemon was designed not to be;
+    (b) **synchronous** like `status_report` — a slow run briefly parks the poll loop, fine for one user; the
+    upgrade path (spawn detached, post back via the bot API like `notify.sh`) needs no new door; (c) `--dangerously-skip-permissions`
+    because there is no TTY to answer prompts — the pinned cwd is a default dir, **not** a sandbox (the agent can
+    read any path the daemon user can), so the allowlist remains the whole boundary, as #4 always intended.
+
+12. **`pull-all` is a deterministic fleet command, not a `claude -p` ask (2026-07-20).** *Objection:* if
+    General already routes free-form messages to `claude -p`, why not just say "pull everything" there? Because
+    pulling a **known, enumerable** set of repos is mechanics, not judgment, and — unlike a report — it can
+    silently eat uncommitted work, so it's exactly the op that wants the skip-dirty guard applied *reliably*,
+    which a free-form agent won't do. So `pull-all` is a keyword sibling of `status`: `system-scripts/pull.py`
+    reuses `status.py`'s enumeration (registry → agents.env → repos) and pulls each `--ff-only`, skipping any
+    dirty/diverged tree. It also pulls the **machines-at-work scaffold** — a sibling of `~/projects`, outside
+    every workspace — resolved from `MAW_SCRIPTS` via `git rev-parse --show-toplevel` (so the scripts/ path the
+    daemon already holds for 🚀 is enough). Scope stops at the fleet + scaffold; `server-orchestrator` itself is
+    pulled by hand, since a daemon change needs `relaunch` to take effect anyway. This is the line #11 predicted:
+    the moment an ask *can* be named as a fixed op with a parameter, it belongs in a deterministic command, not
+    the interpretation path.
+
 ## Phased build (each phase independently verifiable)
 - **Phase 1 — outbound leg (in-plugin, smallest, low-risk).** Extend `notify.sh`: creds set → `sendMessage`
   into `TELEGRAM_TOPIC_ID`. *Verify:* `notify.sh "hi"` from a project lands in its topic. Independently useful

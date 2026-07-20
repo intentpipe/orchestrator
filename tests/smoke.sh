@@ -21,8 +21,10 @@ ws = os.path.join(tmp, "dws", "scaffold"); os.makedirs(ws)
 cfg = {"chat_id": "-100", "allowlist": {"42"}, "maw_scripts": "/opt/maw/scripts"}
 reg = {"5": {"name": "proj", "workspace": ws}}
 class FakeAPI:
-    def __init__(self): self.sent = []; self.reactions = []
-    def send_message(self, chat, text, thread_id=None): self.sent.append((thread_id, text))
+    def __init__(self): self.sent = []; self.reactions = []; self._mid = 0
+    def send_message(self, chat, text, thread_id=None):
+        self.sent.append((thread_id, text)); self._mid += 1
+        return {"result": {"message_id": self._mid}}  # offer_checkout keys the map on this
     def set_reaction(self, chat, mid, emoji): self.reactions.append((mid, emoji))
     def download_voice(self, fid, dest): open(dest, "wb").write(b"x")
 api = FakeAPI()
@@ -34,9 +36,26 @@ ls = lambda: sorted(os.listdir(inbox)) if os.path.isdir(inbox) else []
 # allowlist is the whole security model: a stranger gets no reply AND no reaction
 assert daemon.process_message({"from": {"id": 9}, "message_thread_id": 5, "text": "hi"}, cfg, reg, api).startswith("drop")
 assert not api.sent and not api.reactions, "stranger must get no reply and no reaction"
-# unregistered topic: 👀 then 😱 + a reply naming the problem, no inbox file
-assert daemon.process_message(mk(text="x", message_thread_id=77), cfg, reg, api).startswith("skip: no workspace")
-assert api.reactions == [(1, "👀"), (1, "😱")] and "registered" in api.sent[-1][1]
+# General / unregistered topic: a non-command message is a free-form instruction
+# answered by `claude -p`. With GENERAL_WORKSPACE unset it must fail loudly (config
+# error) — 👀 then 😱 + a reply naming the missing key — like MAW_SCRIPTS for 🚀.
+assert daemon.process_message(mk(text="x", message_thread_id=77), cfg, reg, api).startswith("skip: GENERAL_WORKSPACE unset")
+assert api.reactions == [(1, "👀"), (1, "😱")] and "GENERAL_WORKSPACE" in api.sent[-1][1]
+# GENERAL_WORKSPACE set: stub the one-shot run; the message text is piped to
+# claude -p in that cwd, its output posts back into General (thread 77), 👀→👌.
+gws = os.path.join(tmp, "gws"); os.makedirs(gws)
+gcfg = {**cfg, "general_workspace": gws}
+runs = []
+daemon.run_general = lambda prompt, cwd: runs.append((prompt, cwd)) or f"ran:{prompt}"
+api = FakeAPI()
+assert daemon.process_message(mk(text="show branches with open PRs", message_thread_id=77, mid=20), gcfg, reg, api).startswith("general text → claude -p")
+assert runs[-1] == ("show branches with open PRs", gws), runs
+assert api.sent[-1] == (77, "ran:show branches with open PRs") and api.reactions == [(20, "👀"), (20, "👌")]
+# voice in General: transcribe (stubbed) → quote it back → claude -p on the transcript
+daemon.transcribe = lambda p: "update all projects"
+api = FakeAPI()
+assert daemon.process_message(mk(voice={"file_id": "v"}, message_thread_id=77, mid=21), gcfg, reg, api).startswith("general voice → claude -p")
+assert api.sent[0] == (77, "🎙 > update all projects") and runs[-1][0] == "update all projects"
 # text → RAW drop at updates/.inbox/<epoch>-<msgid>.md, 👀→👌, NO reply text
 api = FakeAPI()
 assert daemon.process_message(mk(text="add dark mode", date=1700000001, mid=7), cfg, reg, api).startswith("queued text")
@@ -50,7 +69,7 @@ assert "1700000002-8.md" in ls() and "hello from voice" in open(os.path.join(inb
 assert api.sent[-1] == (5, "🎙 > hello from voice")
 # unsupported type (photo etc.) → 😱 + reply
 api = FakeAPI()
-assert daemon.process_message(mk(photo=[{"file_id": "p"}], mid=9), cfg, reg, api).startswith("skip: unsupported")
+assert daemon.process_message(mk(photo=[{"file_id": "p"}], mid=9), cfg, reg, api).startswith("skip: only voice notes")
 assert api.reactions[-1] == (9, "😱") and "voice notes and text" in api.sent[-1][1]
 
 # trigger tokens: exact match only, dispatch instead of note. Stub the spawner.
@@ -91,6 +110,63 @@ assert api.sent[-1] == (5, f"REPORT:{ws}") and api.reactions == [(16, "👀"), (
 assert daemon.process_message(mk(text="STATUS", message_thread_id=77, mid=17), cfg, reg, api) == "status report sent (all)"
 assert calls[-1] is None, calls
 assert ls() == before, "status must not write a note"
+
+# `pull-all`: short-circuits like status (writes no note), works in any topic,
+# passes MAW_SCRIPTS through so the scaffold repo is pulled too. Stub the runner.
+pcalls = []
+daemon.pull_report = lambda maw=None: pcalls.append(maw) or "📥 pull-all\n(stub)"
+api = FakeAPI(); before = ls()
+assert daemon.process_message(mk(text="pull-all", mid=18), cfg, reg, api) == "pull-all done"
+assert pcalls[-1] == "/opt/maw/scripts" and api.sent[-1] == (5, "📥 pull-all\n(stub)")
+assert api.reactions == [(18, "👀"), (18, "👌")] and ls() == before, "pull-all must not write a note"
+# case/space-insensitive, and fine from a topic with no workspace (fleet-wide)
+assert daemon.process_message(mk(text=" PULL ALL ", message_thread_id=77, mid=19), cfg, reg, api) == "pull-all done"
+
+# `help`: lists every command. Short-circuits like status/pull-all — replies into
+# its topic, writes no note, works in a project topic and in General alike.
+api = FakeAPI(); before = ls()
+assert daemon.process_message(mk(text="help", mid=22), cfg, reg, api) == "help sent"
+assert api.sent[-1][0] == 5 and "status" in api.sent[-1][1] and "pull-all" in api.sent[-1][1]
+assert "plan" in api.sent[-1][1] and "build-all" in api.sent[-1][1], "help must list the triggers"
+assert api.reactions == [(22, "👀"), (22, "👌")] and ls() == before, "help must not write a note"
+# case-insensitive, accepts /help, and works from a workspace-less topic
+assert daemon.process_message(mk(text=" HELP ", message_thread_id=77, mid=23), cfg, reg, api) == "help sent"
+assert daemon.process_message(mk(text="/help", message_thread_id=77, mid=24), cfg, reg, api) == "help sent"
+
+# `checkout`: post one message per option, remember message_id→offer, react 👌,
+# write no note. Stub the enumerator (no gh/git) and point OFFERS_FILE at the tmp
+# RUN_DIR (it's derived from RUN_DIR at import, before the test repointed RUN_DIR).
+daemon.OFFERS_FILE = os.path.join(daemon.RUN_DIR, "checkout_offers.json")
+opts = {"name": "proj", "workspace": ws, "default": "dev", "options": [
+    {"label": "dev (baseline)", "branches": {"app_mobile": "dev", "core": "dev"}, "prs": []},
+    {"label": "feat/x", "branches": {"app_mobile": "feat/x", "core": "dev"},
+     "prs": [{"repo": "app_mobile", "number": 7, "title": "Add X", "url": "u"}]},
+]}
+daemon.checkout_options = lambda w: opts
+api = FakeAPI(); before = ls()
+assert daemon.process_message(mk(text="checkout", mid=30), cfg, reg, api) == "checkout offered for proj (2 option(s))"
+assert len(api.sent) == 3 and all(s[0] == 5 for s in api.sent), api.sent  # intro + 2 options, all in-topic
+assert "feat/x" in api.sent[-1][1] and "app_mobile: feat/x" in api.sent[-1][1] and "PR #7" in api.sent[-1][1]
+assert api.reactions == [(30, "👀"), (30, "👌")] and ls() == before, "checkout writes no note"
+offers = daemon.load_offers()
+assert len(offers) == 2 and all(o["topic"] == 5 for o in offers.values()), offers
+opt_mid = int(next(m for m, o in offers.items() if o["label"] == "feat/x"))
+
+# reaction on an offer message → check out + build (stub the detached spawner)
+builds = []
+daemon.build_checkout = lambda offer: builds.append(offer) or 555
+mkr = lambda **kw: {"user": {"id": kw.pop("uid", 42)}, "message_id": kw.pop("mid", 1),
+                    "new_reaction": kw.pop("new", [{"type": "emoji", "emoji": "👍"}]), **kw}
+api = FakeAPI()
+assert daemon.process_reaction(mkr(mid=opt_mid), cfg, api).startswith("checkout+build started for proj [feat/x]")
+assert builds and builds[-1]["branches"] == {"app_mobile": "feat/x", "core": "dev"}, builds
+assert api.sent[-1][0] == 5 and "checking out [feat/x]" in api.sent[-1][1]
+# stranger's reaction, a cleared reaction, and a reaction on an unknown message all do nothing
+api = FakeAPI(); builds.clear()
+assert daemon.process_reaction(mkr(mid=opt_mid, uid=9), cfg, api).startswith("drop reaction")
+assert daemon.process_reaction(mkr(mid=opt_mid, new=[]), cfg, api) == "reaction removed, ignored"
+assert daemon.process_reaction(mkr(mid=999999), cfg, api).startswith("reaction on non-offer message")
+assert not builds and not api.sent, "dropped/ignored reactions: no build, no post"
 PY
 echo "[smoke] daemon process_message ok"
 

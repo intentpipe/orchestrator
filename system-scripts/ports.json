@@ -1,6 +1,6 @@
 {
   "_comment": "Per-project services the status collector HTTP-probes to decide FE/BE state (🟢 serving / 🟠 bound-but-erroring / 🔴 down). Keyed by the project name in the daemon registry. Each service is {port, health-path}; a bare int also works (path defaults to /). Port numbers are single-sourced from projects/PORTS.md — keep them in sync when you add or move a service.",
-  "careybo": {
+  "bibbles": {
     "backend": { "port": 8810, "health": "/health" },
     "frontend": { "port": 3031, "health": "/" }
   },

@@ -1,5 +1,5 @@
 # Inbound Telegram daemon, always-on. Install per README:
-#   cp server-orchestrator/systemd/agent-orchestrator.service ~/.config/systemd/user/
+#   cp all-machines-at-work/server-orchestrator/systemd/agent-orchestrator.service ~/.config/systemd/user/
 #   (edit User/paths below if not running as a user unit)
 #   systemctl --user enable --now agent-orchestrator
 # Secrets stay in ~/.agent-orchestrator/telegram.env (chmod 600), never here.
@@ -11,7 +11,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 # %h = the running user's home. Adjust if the checkout lives elsewhere.
-ExecStart=%h/server-orchestrator/daemon.py
+ExecStart=%h/all-machines-at-work/server-orchestrator/daemon.py
 Restart=always
 RestartSec=5
 

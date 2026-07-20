@@ -74,10 +74,11 @@ assert api.reactions[-1] == (9, "😱") and "voice notes and text" in api.sent[-
 
 # trigger tokens: exact match only, dispatch instead of note. Stub the spawner.
 spawns = []
-daemon.spawn_detached = lambda cmd, cwd, base: spawns.append((cmd, cwd, base)) or 4242
+daemon.spawn_detached = lambda cmd, cwd, base, track=None: spawns.append((cmd, cwd, base)) or 4242
 api = FakeAPI(); before = ls()
 assert daemon.process_message(mk(text="🧠", mid=10), cfg, reg, api) == "plan started for proj (pid 4242)"
-assert spawns[-1] == (["claude", "-p", "/machines-at-work:plan headless"], ws, "proj.plan")
+assert spawns[-1] == (["claude", "-p", "/machines-at-work:plan headless", *daemon.PLAN_CLAUDE_FLAGS], ws, "proj.plan")
+assert "--permission-mode" in spawns[-1][0] and "Bash" in " ".join(spawns[-1][0]), "headless plan must run non-interactively"
 assert api.reactions == [(10, "👀"), (10, "👌")] and api.sent[-1][1] == "🧠 planning…"
 assert daemon.process_message(mk(text=" PLAN ", mid=11), cfg, reg, api).startswith("plan started"), "case/whitespace-insensitive"
 assert daemon.process_message(mk(text="build-all", mid=12), cfg, reg, api).startswith("loop started")
@@ -167,6 +168,42 @@ assert daemon.process_reaction(mkr(mid=opt_mid, uid=9), cfg, api).startswith("dr
 assert daemon.process_reaction(mkr(mid=opt_mid, new=[]), cfg, api) == "reaction removed, ignored"
 assert daemon.process_reaction(mkr(mid=999999), cfg, api).startswith("reaction on non-offer message")
 assert not builds and not api.sent, "dropped/ignored reactions: no build, no post"
+
+# `relaunch`: project-scoped, spawns the relaunch script detached, 👀→👌, no note.
+# In a topic with no workspace it refuses with guidance rather than a claude run.
+api = FakeAPI(); before = ls(); spawns.clear()
+assert daemon.process_message(mk(text="relaunch", mid=40), cfg, reg, api).startswith("relaunch started for proj")
+assert spawns[-1] == ([daemon.RELAUNCH, "proj"], os.path.dirname(daemon.RELAUNCH), "proj.relaunch")
+assert api.reactions == [(40, "👀"), (40, "👌")] and ls() == before, "relaunch writes no note"
+assert "relaunching proj" in api.sent[-1][1]
+# in General (no workspace) → refused, no spawn
+n = len(spawns)
+assert daemon.process_message(mk(text="relaunch", message_thread_id=77, mid=41), cfg, reg, api).startswith("skip: relaunch needs a project topic")
+assert len(spawns) == n and "project topic" in api.sent[-1][1]
+
+# reap_jobs: post ✅ on success, 😱 + log tail on non-zero exit OR a rejection in
+# the log (even if it exited 0), and leave still-running jobs untouched.
+class FakePopen:
+    def __init__(self, rc): self._rc = rc
+    def poll(self): return self._rc
+def _job(pname, rc, logtext):
+    lp = os.path.join(tmp, pname + ".joblog"); open(lp, "w").write(logtext)
+    return {"popen": FakePopen(rc), "log": lp, "name": pname, "action": "plan", "topic": 5}
+api = FakeAPI()
+daemon._JOBS[:] = [
+    _job("okproj", 0, "planned 3 tasks\nall good"),
+    _job("failproj", 1, "boom\nTraceback (most recent call last)"),
+    _job("blockedproj", 0, "step 2\nThis command requires approval\n(denied)"),
+    {"popen": FakePopen(None), "log": "/nope", "name": "running", "action": "loop", "topic": 9},
+]
+daemon.reap_jobs(cfg, api)
+assert len(daemon._JOBS) == 1 and daemon._JOBS[0]["name"] == "running", daemon._JOBS  # unfinished stays
+texts = [t for _, t in api.sent]
+assert any(t.startswith("✅ plan for okproj finished") for t in texts), texts       # success
+assert any(t.startswith("😱 plan for failproj") and "boom" in t for t in texts), texts  # crash
+assert any(t.startswith("😱 plan for blockedproj") and "blocked" in t for t in texts), texts  # exit 0 but rejected
+assert len(texts) == 3, texts  # the running job posted nothing
+daemon._JOBS[:] = []
 PY
 echo "[smoke] daemon process_message ok"
 

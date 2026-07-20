@@ -30,6 +30,10 @@ those messages (allow-listed user) checks its branches out and relaunches the
 preview stack, which posts the fresh frontend URL. Receiving reactions needs the
 bot to be a chat admin and `message_reaction` in getUpdates' allowed_updates.
 
+Keyword `relaunch` (in a project topic) rebuilds just that project's preview stack
+(down → fresh up) via its <name>-dev.sh and posts the new frontend URL — the same
+relaunch the checkout flow runs, but on the current checkout rather than a chosen one.
+
 In the General topic (no registered workspace) a message that isn't `status` is
 treated as a free-form instruction (Decision #11): transcribe if voice, then run
 a one-shot `claude -p` in GENERAL_WORKSPACE and post its output back. This is the
@@ -64,6 +68,7 @@ TRANSCRIBE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcrib
 STATUS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "status.py")
 PULL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "pull.py")
 CHECKOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "checkout.py")
+RELAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relaunch")
 # message_id → offer map for `checkout`: reacting to an offer message triggers its
 # build. Persisted so an offer survives the restart between posting and reacting.
 OFFERS_FILE = os.path.join(RUN_DIR, "checkout_offers.json")
@@ -76,6 +81,14 @@ CLAUDE_TIMEOUT = 300
 # Exact-match trigger tokens (Decision #10). Matching is on the stripped,
 # case-folded message text — "plan" inside a sentence never fires.
 TRIGGERS = {"🧠": "plan", "plan": "plan", "🚀": "loop", "build-all": "loop"}
+
+# Headless plan needs a non-interactive permission model or every plugin script
+# (inbound/freshen/task/linear/notify) hits an approval prompt with nobody to
+# answer it and is denied — and the run can't reach the sibling code repos. This
+# is loop.sh's proven contract: acceptEdits + an explicit tool allowlist (Bash
+# included). The allowlist (Decision #4) stays the whole security boundary.
+PLAN_CLAUDE_FLAGS = ["--permission-mode", "acceptEdits",
+                     "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep,Agent,Skill,TodoWrite"]
 
 # Human-facing command list for the `help` keyword. Hand-synced with the keyword
 # short-circuits in _route and the TRIGGERS table above — the daemon's whole
@@ -95,6 +108,7 @@ HELP = (
     "• 🚀 or build-all — run the build loop (loop.sh, detached).\n"
     "• checkout — post the checkout options (default branch + each open-PR "
     "state); react to one to check it out, rebuild, and get the frontend URL.\n"
+    "• relaunch — rebuild this project's preview stack (fresh) and post its URL.\n"
     "• anything else (text or voice) — dropped as an intent note for the next plan.\n"
     "\n"
     "In the General topic:\n"
@@ -387,27 +401,82 @@ def pid_alive(pidfile):
         pid = int(open(pidfile).read().strip())
     except (OSError, ValueError):
         return False
+    # /proc, not kill(pid, 0): the daemon doesn't reap its detached children, so a
+    # finished plan/loop lingers as a ZOMBIE — still a live pid to kill(0), which
+    # would wedge every future trigger at "already running". State 'Z' = not running.
     try:
-        os.kill(pid, 0)
-        return True
+        with open(f"/proc/{pid}/stat") as f:
+            state = f.read().split(") ", 1)[1].split(" ", 1)[0]
+        return state != "Z"
     except OSError:
-        return False  # stale pidfile: the process is gone, proceed
+        return False  # no such process: stale pidfile, proceed
 
 
-def spawn_detached(cmd, cwd, base):
-    """Start cmd detached (survives the daemon), log + pidfile under RUN_DIR."""
+# In-flight detached runs the daemon reaps + reports on: [{popen, name, action,
+# topic, log}]. Fire-and-forget with only a 👌 hid failures — a run rejected or
+# crashed before it could notify.sh left the user staring at "planning…" forever.
+_JOBS = []
+# A run can exit 0 yet have been blocked (a denied tool call reads as "success"
+# once claude explains and stops). These markers in the log betray that.
+REJECT_MARKERS = ("requires approval", "may only access", "permission denied")
+
+
+def spawn_detached(cmd, cwd, base, track=None):
+    """Start cmd detached (survives the daemon), log + pidfile under RUN_DIR.
+    With `track` ({name, action, topic}) the run is registered for reap_jobs to
+    watch and report on when it finishes."""
     os.makedirs(RUN_DIR, exist_ok=True)
-    logf = open(os.path.join(RUN_DIR, base + ".log"), "ab")
+    logpath = os.path.join(RUN_DIR, base + ".log")
+    logf = open(logpath, "ab")
     p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL,
                          stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
     with open(os.path.join(RUN_DIR, base + ".pid"), "w") as f:
         f.write(str(p.pid))
+    if track is not None:
+        _JOBS.append({"popen": p, "log": logpath, **track})
     return p.pid
 
 
+def _log_report(path):
+    """(tail, rejected) for a finished run's log — tail for the reply, rejected
+    True if a permission denial appears anywhere in it."""
+    try:
+        with open(path) as f:
+            data = f.read()
+    except OSError:
+        return "(log unavailable)", False
+    rejected = any(m in data.lower() for m in REJECT_MARKERS)
+    tail = data[-1500:].strip() or "(no output)"
+    return tail, rejected
+
+
+def reap_jobs(cfg, api):
+    """Poll tracked detached runs; when one finishes, reap it (no zombies) and post
+    the outcome into its topic — a concise ✅ on success, a 😱 with the log tail on
+    failure or rejection. (The run's own notify.sh still delivers the substance,
+    e.g. the task list; this is the completion signal.) Called once per poll cycle."""
+    still = []
+    for j in _JOBS:
+        rc = j["popen"].poll()
+        if rc is None:
+            still.append(j)
+            continue
+        tail, rejected = _log_report(j["log"])
+        if rc != 0 or rejected:
+            why = f"exited with code {rc}" if rc != 0 else "was blocked — a tool or command was rejected"
+            api.send_message(cfg["chat_id"],
+                             f"😱 {j['action']} for {j['name']} {why}:\n\n{tail}", j.get("topic"))
+            log(f"{j['action']} for {j['name']} FAILED (rc={rc}, rejected={rejected})")
+        else:
+            api.send_message(cfg["chat_id"], f"✅ {j['action']} for {j['name']} finished.", j.get("topic"))
+            log(f"{j['action']} for {j['name']} finished ok")
+    _JOBS[:] = still
+
+
 def dispatch(action, entry, cfg, api, thread_id, react, fail):
-    """Launch a trigger's process. 👌 means STARTED — completion reaches the
-    topic via the workspace's own notify.sh, not the daemon."""
+    """Launch a trigger's process. 👌 means STARTED; the run's own notify.sh
+    delivers the substance, and reap_jobs posts the completion signal — ✅ on
+    success, 😱 + log tail if it fails or is rejected."""
     name, workspace = entry["name"], entry["workspace"]
     if action == "loop":
         scripts = cfg.get("maw_scripts")
@@ -416,12 +485,13 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
                         "MAW_SCRIPTS is not set in telegram.env — can't launch loop.sh")
         cmd, ack = [os.path.join(scripts, "loop.sh")], "🚀 loop started"
     else:
-        cmd, ack = ["claude", "-p", "/machines-at-work:plan headless"], "🧠 planning…"
+        cmd, ack = ["claude", "-p", "/machines-at-work:plan headless", *PLAN_CLAUDE_FLAGS], "🧠 planning…"
     base = f"{name}.{action}"
     if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
         return fail(f"skip: {action} already running for {name}", f"{action} is already running")
     try:
-        pid = spawn_detached(cmd, workspace, base)
+        pid = spawn_detached(cmd, workspace, base,
+                             track={"name": name, "action": action, "topic": thread_id})
     except OSError as e:
         return fail(f"error: spawn {action} failed: {e}", f"couldn't start {action}: {e}")
     api.send_message(cfg["chat_id"], ack, thread_id)
@@ -486,6 +556,12 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
         react("👌")
         return "help sent"
 
+    # relaunch is project-scoped — it rebuilds ONE project's preview. In a topic
+    # with no workspace, say so rather than firing a free-form `claude -p`.
+    if stripped == "relaunch" and not entry:
+        return fail("skip: relaunch needs a project topic",
+                    "run `relaunch` inside a project topic — it rebuilds that project's preview.")
+
     if not entry:
         # General (or any unregistered topic): not a command, so treat the
         # message as a free-form instruction and answer it with `claude -p`.
@@ -499,6 +575,22 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
     # reacting to one builds it. Project-scoped — it needs this topic's repos.
     if stripped == "checkout":
         return offer_checkout(entry, cfg, api, thread_id, react, fail)
+
+    # `relaunch`: rebuild just this project's preview stack (down → fresh up) and
+    # post the new frontend URL. Detached — the rebuild takes minutes; relaunch
+    # posts the URL (or a failure) into the topic itself when it's done.
+    if stripped == "relaunch":
+        name = entry["name"]
+        base = f"{name}.relaunch"
+        if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
+            return fail(f"skip: relaunch already running for {name}", "a relaunch is already running")
+        try:
+            pid = spawn_detached([RELAUNCH, name], os.path.dirname(RELAUNCH), base)
+        except OSError as e:
+            return fail(f"error: spawn relaunch failed: {e}", f"couldn't start relaunch: {e}")
+        api.send_message(cfg["chat_id"], f"🚀 relaunching {name} — the fresh frontend URL will follow.", thread_id)
+        react("👌")
+        return f"relaunch started for {name} (pid {pid})"
 
     action = TRIGGERS.get(stripped)
     if action:
@@ -556,6 +648,10 @@ def run(once=False):
                 except Exception as e:
                     log(f"error on reaction update {u['update_id']}: {e}")
             write_offset(offset)
+        try:  # report + reap any finished plan/loop runs (every cycle, even with no updates)
+            reap_jobs(cfg, api)
+        except Exception as e:
+            log(f"reap_jobs error: {e}")
         if once:
             return
 

@@ -97,6 +97,11 @@ pipeline instead of becoming a note (exact match only — "let's plan later" is 
 🚀 is the plan approval: text intent → 🧠 → read the posted plan → 🚀. A second trigger while
 one is running replies "already running" (pidfiles + child logs under `~/.agent-orchestrator/run/`).
 
+When a 🧠/🚀 run finishes, the daemon posts the outcome back into the topic — **✅** on success,
+**😱 + the log tail** if it exited non-zero or a command was rejected — so a run never fails silently
+(the earlier gap: a headless plan denied at a permission prompt died leaving only a 👌). The run's own
+`notify.sh` still delivers the substance (the task list); this is the completion signal on top.
+
 Every message you send gets a reaction: 👀 processing, then 👌 queued/started, or 😱 plus a reply
 saying what went wrong. (Telegram bots can only react from a fixed emoji set — no ✅/⚠️.)
 

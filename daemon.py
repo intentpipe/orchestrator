@@ -8,7 +8,8 @@ rationale: DESIGN.md (alongside this file).
 Long-poll getUpdates → enforce the allowlist (the only door, Decision #4) →
 resolve the message's forum topic to a workspace via the registry → then either
 dispatch a trigger token (Decision #10: 🧠/`plan` → headless /machines-at-work:plan,
-🚀/`build-all` → detached loop.sh; exact match only) or transcribe voice / take
+🚀/`build-all` → detached loop.sh, 🩹/`unblock` → headless /machines-at-work:unblock;
+exact match only) or transcribe voice / take
 text and drop the RAW message into <workspace>/updates/.inbox/<epoch>-<msgid>.md
 — machines-at-work's inbound.sh contract; the plugin names and formats notes,
 never the daemon. Every allow-listed message gets a reaction lifecycle:
@@ -80,7 +81,8 @@ CLAUDE_TIMEOUT = 300
 
 # Exact-match trigger tokens (Decision #10). Matching is on the stripped,
 # case-folded message text — "plan" inside a sentence never fires.
-TRIGGERS = {"🧠": "plan", "plan": "plan", "🚀": "loop", "build-all": "loop"}
+TRIGGERS = {"🧠": "plan", "plan": "plan", "🚀": "loop", "build-all": "loop",
+            "🩹": "unblock", "unblock": "unblock"}
 
 # Headless plan needs a non-interactive permission model or every plugin script
 # (inbound/freshen/task/linear/notify) hits an approval prompt with nobody to
@@ -106,6 +108,8 @@ HELP = (
     "In a project topic:\n"
     "• 🧠 or plan — plan the queued notes (headless /machines-at-work:plan).\n"
     "• 🚀 or build-all — run the build loop (loop.sh, detached).\n"
+    "• 🩹 or unblock — diagnose why the build queue is stuck and auto-resolve the "
+    "safe cases (finished-but-unmerged, clean retry); the rest are escalated with a reason.\n"
     "• checkout — post the checkout options (default branch + each open-PR "
     "state); react to one to check it out, rebuild, and get the frontend URL.\n"
     "• relaunch — rebuild this project's preview stack (fresh) and post its URL.\n"
@@ -484,6 +488,8 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
             return fail("skip: MAW_SCRIPTS unset",
                         "MAW_SCRIPTS is not set in telegram.env — can't launch loop.sh")
         cmd, ack = [os.path.join(scripts, "loop.sh")], "🚀 loop started"
+    elif action == "unblock":
+        cmd, ack = ["claude", "-p", "/machines-at-work:unblock headless", *PLAN_CLAUDE_FLAGS], "🩹 unblocking…"
     else:
         cmd, ack = ["claude", "-p", "/machines-at-work:plan headless", *PLAN_CLAUDE_FLAGS], "🧠 planning…"
     base = f"{name}.{action}"

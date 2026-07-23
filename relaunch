@@ -93,10 +93,13 @@ while IFS=$'\t' read -r topic name workspace; do
     || echo "[relaunch] rebuild/up did not exit cleanly (see below)"
   cat "$uplog"
 
-  # Both dev scripts print a "(Flutter web) : <url>" line via their urls command.
-  # Persistent named tunnel: it's the fixed https://<name>.<domain> (previously an
-  # ephemeral *.trycloudflare.com URL), so match any https host.
-  url="$(grep -i '(Flutter web)' "$uplog" | grep -oE 'https://[A-Za-z0-9.-]+' | head -1)"
+  # Every dev script's `urls` tags its frontend line with "(static release" (and
+  # never the API line), but the label differs per project — tyf prints
+  # "App (Flutter web) : <url>", bibbles prints "Frontend : <url>" — so keying on
+  # "(Flutter web)" silently missed bibbles. Match the shared "static release"
+  # marker instead. Persistent named tunnel: the URL is the fixed
+  # https://<name>.<domain> (was an ephemeral *.trycloudflare.com), so match any https host.
+  url="$(grep -i 'static release' "$uplog" | grep -oE 'https://[A-Za-z0-9.-]+' | head -1)"
   rm -f "$uplog"
 
   if [ -z "$url" ]; then

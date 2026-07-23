@@ -84,7 +84,7 @@ Guarded on purpose: a repo is pulled only if its tree is **clean** and the pull 
 circuits routing and writes no note. Implementation: `system-scripts/pull.py` (imports
 `status.py` for the fleet enumeration; pure stdlib; also runnable from the shell).
 
-## Topic triggers: 🧠 plan · 🚀 build-all
+## Topic triggers: 🧠 plan · 🚀 build-all · 🩹 unblock
 
 In a **registered project topic**, a message that is exactly one of these tokens drives the
 pipeline instead of becoming a note (exact match only — "let's plan later" is still a note):
@@ -93,11 +93,14 @@ pipeline instead of becoming a note (exact match only — "let's plan later" is 
 |---|---|
 | 🧠 or `plan` | headless `/machines-at-work:plan` in the workspace — drains queued notes, posts the task list back into the topic |
 | 🚀 or `build-all` | detached `loop.sh` — set `MAW_SCRIPTS=` in `telegram.env` to the plugin's `scripts/` dir |
+| 🩹 or `unblock` | headless `/machines-at-work:unblock` — diagnoses why the build queue is stuck and auto-resolves the safe cases (finished-but-unmerged, clean retry); the rest are escalated with a precise reason |
 
 🚀 is the plan approval: text intent → 🧠 → read the posted plan → 🚀. A second trigger while
 one is running replies "already running" (pidfiles + child logs under `~/.agent-orchestrator/run/`).
+🩹 when a `loop.sh` run stops on a block: it merges work that only missed its merge step and resets
+un-started tasks for a clean retry, then tells you what genuinely needs a human (and what to run next).
 
-When a 🧠/🚀 run finishes, the daemon posts the outcome back into the topic — **✅** on success,
+When a 🧠/🚀/🩹 run finishes, the daemon posts the outcome back into the topic — **✅** on success,
 **😱 + the log tail** if it exited non-zero or a command was rejected — so a run never fails silently
 (the earlier gap: a headless plan denied at a permission prompt died leaving only a 👌). The run's own
 `notify.sh` still delivers the substance (the task list); this is the completion signal on top.

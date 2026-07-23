@@ -83,6 +83,11 @@ assert api.reactions == [(10, "👀"), (10, "👌")] and api.sent[-1][1] == "�
 assert daemon.process_message(mk(text=" PLAN ", mid=11), cfg, reg, api).startswith("plan started"), "case/whitespace-insensitive"
 assert daemon.process_message(mk(text="build-all", mid=12), cfg, reg, api).startswith("loop started")
 assert spawns[-1][0] == ["/opt/maw/scripts/loop.sh"] and spawns[-1][2] == "proj.loop"
+# 🩹/unblock: headless /machines-at-work:unblock, own pidfile, non-interactive flags
+assert daemon.process_message(mk(text="🩹", mid=120), cfg, reg, api).startswith("unblock started for proj")
+assert spawns[-1][0] == ["claude", "-p", "/machines-at-work:unblock headless", *daemon.PLAN_CLAUDE_FLAGS] and spawns[-1][2] == "proj.unblock"
+assert api.sent[-1][1] == "🩹 unblocking…"
+assert daemon.process_message(mk(text="unblock", mid=121), cfg, reg, api).startswith("unblock started"), "word form triggers too"
 assert ls() == before, "triggers must not write inbox files"
 # a token inside a sentence is a note, not a trigger
 n = len(spawns)
@@ -128,7 +133,7 @@ assert daemon.process_message(mk(text=" PULL ALL ", message_thread_id=77, mid=19
 api = FakeAPI(); before = ls()
 assert daemon.process_message(mk(text="help", mid=22), cfg, reg, api) == "help sent"
 assert api.sent[-1][0] == 5 and "status" in api.sent[-1][1] and "pull-all" in api.sent[-1][1]
-assert "plan" in api.sent[-1][1] and "build-all" in api.sent[-1][1], "help must list the triggers"
+assert "plan" in api.sent[-1][1] and "build-all" in api.sent[-1][1] and "unblock" in api.sent[-1][1], "help must list the triggers"
 assert api.reactions == [(22, "👀"), (22, "👌")] and ls() == before, "help must not write a note"
 # case-insensitive, accepts /help, and works from a workspace-less topic
 assert daemon.process_message(mk(text=" HELP ", message_thread_id=77, mid=23), cfg, reg, api) == "help sent"

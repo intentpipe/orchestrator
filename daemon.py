@@ -418,7 +418,11 @@ def pid_alive(pidfile):
 _JOBS = []
 # A run can exit 0 yet have been blocked (a denied tool call reads as "success"
 # once claude explains and stops). These markers in the log betray that.
-REJECT_MARKERS = ("requires approval", "may only access", "permission denied")
+# Keep them SPECIFIC to the harness's own denial text: a generic "permission
+# denied" also matches infra noise (e.g. an early docker-socket blip during a
+# verify that then passes), which fired a false 😱 on a clean 5-task loop — so
+# it is intentionally NOT a marker.
+REJECT_MARKERS = ("requires approval", "may only access")
 
 
 def spawn_detached(cmd, cwd, base, track=None):

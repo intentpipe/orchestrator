@@ -84,7 +84,7 @@ Guarded on purpose: a repo is pulled only if its tree is **clean** and the pull 
 circuits routing and writes no note. Implementation: `system-scripts/pull.py` (imports
 `status.py` for the fleet enumeration; pure stdlib; also runnable from the shell).
 
-## Topic triggers: 🧠 plan · 🚀 build-all
+## Topic triggers: 🧠 plan · 🚀 build-all · 🩹 unblock
 
 In a **registered project topic**, a message that is exactly one of these tokens drives the
 pipeline instead of becoming a note (exact match only — "let's plan later" is still a note):
@@ -93,11 +93,14 @@ pipeline instead of becoming a note (exact match only — "let's plan later" is 
 |---|---|
 | 🧠 or `plan` | headless `/machines-at-work:plan` in the workspace — drains queued notes, posts the task list back into the topic |
 | 🚀 or `build-all` | detached `loop.sh` — set `MAW_SCRIPTS=` in `telegram.env` to the plugin's `scripts/` dir |
+| 🩹 or `unblock` | headless `/machines-at-work:unblock` — diagnoses why the build queue is stuck and auto-resolves the safe cases (finished-but-unmerged, clean retry); the rest are escalated with a precise reason |
 
 🚀 is the plan approval: text intent → 🧠 → read the posted plan → 🚀. A second trigger while
 one is running replies "already running" (pidfiles + child logs under `~/.agent-orchestrator/run/`).
+🩹 when a `loop.sh` run stops on a block: it merges work that only missed its merge step and resets
+un-started tasks for a clean retry, then tells you what genuinely needs a human (and what to run next).
 
-When a 🧠/🚀 run finishes, the daemon posts the outcome back into the topic — **✅** on success,
+When a 🧠/🚀/🩹 run finishes, the daemon posts the outcome back into the topic — **✅** on success,
 **😱 + the log tail** if it exited non-zero or a command was rejected — so a run never fails silently
 (the earlier gap: a headless plan denied at a permission prompt died leaving only a 👌). The run's own
 `notify.sh` still delivers the substance (the task list); this is the completion signal on top.
@@ -175,3 +178,36 @@ Server-wide, cross-project tooling that isn't the Telegram bridge itself: the `s
 collector, the `pull-all` fast-forward puller, and the `checkout` option enumerator/builder
 (all reuse `status.py`'s registry + agents.env + git walk). Anything the daemon exposes as a
 keyword-driven "act on the whole box" belongs here.
+
+## Keyword: `logmine`
+
+Send `logmine` in any topic and the daemon audits **its own tooling** by reading its logs.
+It mirrors the `checkout` offer→react→build flow:
+
+1. `logmine/collect_logs.py` gathers the orchestrator logs not seen since the last run —
+   the daemon's journald output (unit `agent-orchestrator`) plus the tails of the child runs
+   in `run/*.log` — tracked by a watermark (`~/.agent-orchestrator/logmine.state`: a journald
+   cursor + per-file byte offsets, so nothing is double-read or skipped).
+2. A synchronous `claude -p` with `logmine/analyze.md` turns that into a JSON array of
+   **tooling-improvement proposals**, scoped to the two repos that produced the logs
+   (`server-orchestrator`, the `machines-at-work` plugin) — never project app code. The
+   watermark advances once analysis returns.
+3. Each proposal is posted as its own message, remembered by `message_id` (`run/logmine_offers.json`).
+4. **React to a proposal** → the daemon spawns a detached `claude -p` with `logmine/implement.md`
+   and `--dangerously-skip-permissions` in the target repo: it commits+pushes the current state
+   first, then implements the one change on a fresh branch and opens a PR (the guard forbids
+   default-branch pushes). `reap_jobs` posts the result with the PR URL.
+
+Not reacting is an implicit "deny" — the proposal simply expires from the map.
+
+## Plugin freshness (`sync_plugin`)
+
+The `machines-at-work` plugin's **skills** run from a version-pinned install *cache*
+(`~/.claude/plugins/cache/…`), while only its `scripts/` run live via `MAW_SCRIPTS`. So a
+version bump that isn't reinstalled leaves headless skill runs (plan/build/unblock) executing a
+**stale** copy — this is a real trap: the cache once sat at 0.19.0, predating the `unblock`
+skill entirely, so the 🩹 trigger invoked a skill that wasn't installed. `sync_plugin()` runs
+before every dispatch: if the source `plugin.json` version moved past what's installed, it
+`claude plugin marketplace update` + `claude plugin update` to refresh the cache. That is what
+keeps the project scaffolds auto-updated to a new machines-at-work version — bump the version,
+and the next plan/build/unblock/logmine reinstalls it.

@@ -80,18 +80,26 @@ while IFS=$'\t' read -r topic name workspace; do
     sleep 1
   fi
 
-  echo "[relaunch] up (fresh build) ..."
-  # Redirect to a FILE, never $(...): `up` launches long-lived flutter and
-  # cloudflared in the background, and command substitution would block on their
-  # still-open pipe forever. A file redirect returns as soon as cmd_up finishes;
-  # `timeout` is only a backstop in case a dev script itself wedges.
+  echo "[relaunch] rebuild (fresh frontend) + up (backend) ..."
+  # Redirect to a FILE, never $(...): the dev scripts launch a long-lived static
+  # web server in the background, and command substitution would block on its
+  # still-open pipe forever. A file redirect returns as soon as the commands
+  # finish; `timeout` is only a backstop in case a dev script itself wedges.
+  # `rebuild` RECOMPILES the frontend from the freshly-checked-out branch (a plain
+  # `up` would only re-serve the stale existing build); `up` then ensures the
+  # backend is running (its serve step no-ops since rebuild already serves).
   uplog="$(mktemp)"
-  timeout 180 bash -c 'cd "$1" && bash "$2" up' _ "$root" "$dev" >"$uplog" 2>&1 \
-    || echo "[relaunch] up did not exit cleanly (see below)"
+  timeout 420 bash -c 'cd "$1" && bash "$2" rebuild && bash "$2" up' _ "$root" "$dev" >"$uplog" 2>&1 \
+    || echo "[relaunch] rebuild/up did not exit cleanly (see below)"
   cat "$uplog"
 
-  # Both dev scripts print a "(Flutter web) : <url>" line via their urls command.
-  url="$(grep -i '(Flutter web)' "$uplog" | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -1)"
+  # Every dev script's `urls` tags its frontend line with "(static release" (and
+  # never the API line), but the label differs per project — tyf prints
+  # "App (Flutter web) : <url>", bibbles prints "Frontend : <url>" — so keying on
+  # "(Flutter web)" silently missed bibbles. Match the shared "static release"
+  # marker instead. Persistent named tunnel: the URL is the fixed
+  # https://<name>.<domain> (was an ephemeral *.trycloudflare.com), so match any https host.
+  url="$(grep -i 'static release' "$uplog" | grep -oE 'https://[A-Za-z0-9.-]+' | head -1)"
   rm -f "$uplog"
 
   if [ -z "$url" ]; then

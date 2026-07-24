@@ -8,7 +8,8 @@ rationale: DESIGN.md (alongside this file).
 Long-poll getUpdates → enforce the allowlist (the only door, Decision #4) →
 resolve the message's forum topic to a workspace via the registry → then either
 dispatch a trigger token (Decision #10: 🧠/`plan` → headless /machines-at-work:plan,
-🚀/`build-all` → detached loop.sh; exact match only) or transcribe voice / take
+🚀/`build-all` → detached loop.sh, 🩹/`unblock` → headless /machines-at-work:unblock;
+exact match only) or transcribe voice / take
 text and drop the RAW message into <workspace>/updates/.inbox/<epoch>-<msgid>.md
 — machines-at-work's inbound.sh contract; the plugin names and formats notes,
 never the daemon. Every allow-listed message gets a reaction lifecycle:
@@ -74,13 +75,31 @@ RELAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relaunch")
 OFFERS_FILE = os.path.join(RUN_DIR, "checkout_offers.json")
 OFFERS_KEEP = 60  # cap the map so it can't grow without bound
 
+# logmine: read new orchestrator logs → propose tooling improvements → a reaction
+# on a proposal implements it (branch + PR). Mirrors the checkout offer→react→build
+# flow; its message_id → proposal map is persisted the same way.
+ORCH_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGMINE_COLLECT = os.path.join(ORCH_DIR, "logmine", "collect_logs.py")
+LOGMINE_ANALYZE = os.path.join(ORCH_DIR, "logmine", "analyze.md")
+LOGMINE_IMPLEMENT = os.path.join(ORCH_DIR, "logmine", "implement.md")
+LOGMINE_OFFERS_FILE = os.path.join(RUN_DIR, "logmine_offers.json")
+
+# machines-at-work plugin: its SKILLS run from a version-pinned install CACHE
+# (only its scripts/ run live, via MAW_SCRIPTS), so a version bump that isn't
+# reinstalled leaves headless skill runs (plan/build/unblock) executing a STALE
+# copy. sync_plugin() reinstalls when the source version moved, before a dispatch.
+MAW_PLUGIN_ID = "machines-at-work@machines-at-work"
+MAW_MARKETPLACE = "machines-at-work"
+INSTALLED_PLUGINS = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
+
 # Ceiling for a General `claude -p` run. It parks the poll loop meanwhile (same
 # synchronous-subprocess shape as status_report), so keep it bounded.
 CLAUDE_TIMEOUT = 300
 
 # Exact-match trigger tokens (Decision #10). Matching is on the stripped,
 # case-folded message text — "plan" inside a sentence never fires.
-TRIGGERS = {"🧠": "plan", "plan": "plan", "🚀": "loop", "build-all": "loop"}
+TRIGGERS = {"🧠": "plan", "plan": "plan", "🚀": "loop", "build-all": "loop",
+            "🩹": "unblock", "unblock": "unblock"}
 
 # Headless plan needs a non-interactive permission model or every plugin script
 # (inbound/freshen/task/linear/notify) hits an approval prompt with nobody to
@@ -101,11 +120,15 @@ HELP = (
     "topic it scopes to that project; elsewhere it covers every project.\n"
     "• pull-all — fast-forward-pull every repo in the fleet (and the "
     "machines-at-work plugin); dirty trees are skipped, never clobbered.\n"
+    "• logmine — read the orchestrator's own logs since last time and post "
+    "tooling-improvement proposals; react to one to implement it (branch + PR).\n"
     "• help — this message.\n"
     "\n"
     "In a project topic:\n"
     "• 🧠 or plan — plan the queued notes (headless /machines-at-work:plan).\n"
     "• 🚀 or build-all — run the build loop (loop.sh, detached).\n"
+    "• 🩹 or unblock — diagnose why the build queue is stuck and auto-resolve the "
+    "safe cases (finished-but-unmerged, clean retry); the rest are escalated with a reason.\n"
     "• checkout — post the checkout options (default branch + each open-PR "
     "state); react to one to check it out, rebuild, and get the frontend URL.\n"
     "• relaunch — rebuild this project's preview stack (fresh) and post its URL.\n"
@@ -359,11 +382,175 @@ def build_checkout(offer):
                           f"{offer['name']}.checkout")
 
 
+def _maw_plugin_dir(cfg):
+    s = cfg.get("maw_scripts")
+    return os.path.dirname(s.rstrip("/")) if s else None
+
+
+def _installed_plugin_version():
+    try:
+        return json.load(open(INSTALLED_PLUGINS))["plugins"][MAW_PLUGIN_ID][0]["version"]
+    except Exception:
+        return None
+
+
+def _source_plugin_version(cfg):
+    pd = _maw_plugin_dir(cfg)
+    if not pd:
+        return None
+    try:
+        return json.load(open(os.path.join(pd, ".claude-plugin", "plugin.json")))["version"]
+    except Exception:
+        return None
+
+
+def sync_plugin(cfg):
+    """Reinstall the machines-at-work plugin when its source version moved past
+    what's installed, so headless skill runs (plan/build/unblock) never execute a
+    STALE cached copy — the plugin's skills run from a version-pinned install
+    cache, only its scripts/ run live via MAW_SCRIPTS. No-op when already current;
+    best-effort, never blocks a trigger. This is what keeps the project scaffolds
+    auto-updated to a new machines-at-work version."""
+    src = _source_plugin_version(cfg)
+    inst = _installed_plugin_version()
+    if not src or src == inst:
+        return
+    log(f"plugin update: installed {inst} → source {src}; reinstalling cache")
+    for cmd in (["claude", "plugin", "marketplace", "update", MAW_MARKETPLACE],
+                ["claude", "plugin", "update", MAW_PLUGIN_ID]):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            if r.returncode != 0:
+                log(f"plugin update step failed (non-fatal): {r.stderr.strip()[:200]}")
+        except Exception as e:
+            log(f"plugin update step errored (non-fatal): {e}")
+
+
+def load_logmine_offers():
+    try:
+        return json.load(open(LOGMINE_OFFERS_FILE))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_logmine_offers(offers):
+    if len(offers) > OFFERS_KEEP:  # dict preserves insertion order → drop the oldest
+        offers = dict(list(offers.items())[-OFFERS_KEEP:])
+    os.makedirs(RUN_DIR, exist_ok=True)
+    tmp = LOGMINE_OFFERS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(offers, f)
+    os.replace(tmp, LOGMINE_OFFERS_FILE)
+
+
+def _json_array(text):
+    """First top-level JSON array in claude's stdout (it may wrap it in prose or a
+    ```json fence). [] on anything unparseable."""
+    i, j = text.find("["), text.rfind("]")
+    if i == -1 or j == -1 or j < i:
+        return []
+    try:
+        v = json.loads(text[i:j + 1])
+        return v if isinstance(v, list) else []
+    except ValueError:
+        return []
+
+
+def _slug(s):
+    out = "".join(c if c.isalnum() else "-" for c in s.lower()).strip("-")
+    while "--" in out:
+        out = out.replace("--", "-")
+    return (out or "change")[:40]
+
+
+def run_logmine(cfg, api, thread_id, react, fail):
+    """`logmine`: read the orchestrator logs not seen since the last run, ask claude
+    for tooling improvements, and post each as its own message the user can
+    react-to-implement. Synchronous like a General claude run — it parks the poll
+    loop, bounded by CLAUDE_TIMEOUT; acceptable for one user."""
+    try:
+        logs = subprocess.run([sys.executable, LOGMINE_COLLECT],
+                              capture_output=True, text=True, timeout=90).stdout
+    except Exception as e:
+        return fail(f"error: logmine collect failed: {e}", f"couldn't read the logs: {e}")
+    if logs.lstrip().startswith("(no new orchestrator logs"):
+        api.send_message(cfg["chat_id"], "🔍 logmine: no new logs since the last run.", thread_id)
+        react("👌")
+        return "logmine: no new logs"
+    api.send_message(cfg["chat_id"], "🔍 logmine: reading new logs…", thread_id)
+    prompt = open(LOGMINE_ANALYZE).read() + "\n\n=== LOGS ===\n" + logs
+    try:
+        out = subprocess.run(["claude", "-p", prompt, "--dangerously-skip-permissions"],
+                             cwd=ORCH_DIR, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return fail("logmine analyze timed out", "the log analysis took too long and was stopped")
+    if out.returncode != 0:
+        return fail(f"error: logmine analyze rc={out.returncode}",
+                    f"analysis failed: {out.stderr.strip()[:300]}")
+    proposals = _json_array(out.stdout)
+    # Watermark advances now: these logs have been analyzed (whether or not they
+    # produced proposals); re-reading them would just resurface the same findings.
+    try:
+        subprocess.run([sys.executable, LOGMINE_COLLECT, "--commit"],
+                       capture_output=True, text=True, timeout=90)
+    except Exception:
+        pass
+    if not proposals:
+        api.send_message(cfg["chat_id"], "🔍 logmine: nothing worth changing in the new logs.", thread_id)
+        react("👌")
+        return "logmine: no proposals"
+    offers = load_logmine_offers()
+    sev = {"high": "🔴", "medium": "🟠", "low": "🟡"}
+    for p in proposals[:6]:
+        body = (f"{sev.get(p.get('severity', ''), '•')} logmine · {p.get('repo', '?')}\n"
+                f"{p.get('title', '(untitled)')}\n\n"
+                f"problem: {p.get('problem', '')}\n"
+                f"change: {p.get('change', '')}\n"
+                f"evidence: {p.get('evidence', '')}\n\n"
+                "React to this message to implement it (branch + PR).")
+        resp = api.send_message(cfg["chat_id"], body, thread_id)
+        mid = (resp or {}).get("result", {}).get("message_id")
+        if mid is not None:
+            offers[str(mid)] = {"proposal": p, "topic": thread_id}
+    save_logmine_offers(offers)
+    react("👌")
+    return f"logmine: {len(proposals)} proposal(s) posted"
+
+
+def start_logmine_implement(lm, cfg, api):
+    """A reaction on a logmine proposal message: implement it headless (branch +
+    PR) in its target repo with --dangerously-skip-permissions. Scope is enforced
+    by the implement prompt (orchestrator or plugin only); reap_jobs posts the
+    result including the PR URL (report_tail)."""
+    p = lm.get("proposal", {})
+    topic = lm.get("topic")
+    repo = p.get("repo")
+    cwd = ORCH_DIR if repo == "server-orchestrator" else _maw_plugin_dir(cfg)
+    if not cwd or not os.path.isdir(cwd):
+        api.send_message(cfg["chat_id"], f"⚠️ logmine: unknown target repo '{repo}' — can't implement.", topic)
+        return f"logmine implement: bad repo {repo}"
+    slug = _slug(p.get("title", "change"))
+    base = f"logmine.{slug}"
+    if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
+        api.send_message(cfg["chat_id"], f"⏳ already implementing “{p.get('title')}”.", topic)
+        return f"skip: logmine implement already running for {slug}"
+    prompt = open(LOGMINE_IMPLEMENT).read() + "\n\n=== PROPOSAL ===\n" + json.dumps(p, indent=2)
+    try:
+        pid = spawn_detached(["claude", "-p", prompt, "--dangerously-skip-permissions"], cwd, base,
+                             track={"name": slug, "action": "logmine", "topic": topic, "report_tail": True})
+    except OSError as e:
+        api.send_message(cfg["chat_id"], f"⚠️ couldn't start implement: {e}", topic)
+        return f"error: logmine implement spawn failed: {e}"
+    api.send_message(cfg["chat_id"], f"🛠 implementing “{p.get('title')}” in {repo} — a PR will follow.", topic)
+    return f"logmine implement started for {slug} (pid {pid})"
+
+
 def process_reaction(r, cfg, api):
     """Handle a message_reaction update. Only an allow-listed user's *added*
-    reaction on a remembered checkout-offer message does anything — it checks out
-    that option and builds it. Every other reaction is ignored (same silence a
-    non-allow-listed message gets: probing the bot must teach nothing)."""
+    reaction on a remembered checkout-offer or logmine-proposal message does
+    anything — it builds that checkout, or implements that proposal. Every other
+    reaction is ignored (same silence a non-allow-listed message gets: probing the
+    bot must teach nothing)."""
     user = str(r.get("user", {}).get("id", ""))
     if user not in cfg["allowlist"]:
         return f"drop reaction: user {user or '?'} not allow-listed"
@@ -372,6 +559,9 @@ def process_reaction(r, cfg, api):
     mid = str(r.get("message_id"))
     offer = load_offers().get(mid)
     if not offer:
+        lm = load_logmine_offers().get(mid)
+        if lm:
+            return start_logmine_implement(lm, cfg, api)
         return f"reaction on non-offer message {mid}, ignored"
     base = os.path.join(RUN_DIR, f"{offer['name']}.checkout.pid")
     if pid_alive(base):
@@ -418,7 +608,11 @@ def pid_alive(pidfile):
 _JOBS = []
 # A run can exit 0 yet have been blocked (a denied tool call reads as "success"
 # once claude explains and stops). These markers in the log betray that.
-REJECT_MARKERS = ("requires approval", "may only access", "permission denied")
+# Keep them SPECIFIC to the harness's own denial text: a generic "permission
+# denied" also matches infra noise (e.g. an early docker-socket blip during a
+# verify that then passes), which fired a false 😱 on a clean 5-task loop — so
+# it is intentionally NOT a marker.
+REJECT_MARKERS = ("requires approval", "may only access")
 
 
 def spawn_detached(cmd, cwd, base, track=None):
@@ -468,7 +662,10 @@ def reap_jobs(cfg, api):
                              f"😱 {j['action']} for {j['name']} {why}:\n\n{tail}", j.get("topic"))
             log(f"{j['action']} for {j['name']} FAILED (rc={rc}, rejected={rejected})")
         else:
-            api.send_message(cfg["chat_id"], f"✅ {j['action']} for {j['name']} finished.", j.get("topic"))
+            done = f"✅ {j['action']} for {j['name']} finished."
+            if j.get("report_tail"):   # e.g. logmine implement — surface the PR URL
+                done += f"\n\n{tail}"
+            api.send_message(cfg["chat_id"], done, j.get("topic"))
             log(f"{j['action']} for {j['name']} finished ok")
     _JOBS[:] = still
 
@@ -477,6 +674,7 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
     """Launch a trigger's process. 👌 means STARTED; the run's own notify.sh
     delivers the substance, and reap_jobs posts the completion signal — ✅ on
     success, 😱 + log tail if it fails or is rejected."""
+    sync_plugin(cfg)   # a headless skill run must never execute a stale plugin cache
     name, workspace = entry["name"], entry["workspace"]
     if action == "loop":
         scripts = cfg.get("maw_scripts")
@@ -484,6 +682,8 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
             return fail("skip: MAW_SCRIPTS unset",
                         "MAW_SCRIPTS is not set in telegram.env — can't launch loop.sh")
         cmd, ack = [os.path.join(scripts, "loop.sh")], "🚀 loop started"
+    elif action == "unblock":
+        cmd, ack = ["claude", "-p", "/machines-at-work:unblock headless", *PLAN_CLAUDE_FLAGS], "🩹 unblocking…"
     else:
         cmd, ack = ["claude", "-p", "/machines-at-work:plan headless", *PLAN_CLAUDE_FLAGS], "🧠 planning…"
     base = f"{name}.{action}"
@@ -548,6 +748,11 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
         api.send_message(cfg["chat_id"], pull_report(cfg.get("maw_scripts")), thread_id)
         react("👌")
         return "pull-all done"
+
+    # `logmine`: box-level like status/pull-all — read the orchestrator's own logs
+    # since the last run and post tooling-improvement proposals to react-to-implement.
+    if stripped == "logmine":
+        return run_logmine(cfg, api, thread_id, react, fail)
 
     # `help`: list every command. Short-circuits routing like `status` — works in
     # any topic and never writes a note.

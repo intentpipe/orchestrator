@@ -78,6 +78,16 @@ start_backend() {
 
 build_frontend() {
   declare -F pre_build >/dev/null && pre_build
+  # Regenerate code-gen outputs (freezed / json_serializable) before building.
+  # *.freezed.dart and *.g.dart are gitignored, so a fresh or branch-switched
+  # checkout carries stale/missing generated code; `flutter build web` then
+  # compiles against it and dies at dart2js (e.g. "No named parameter with the
+  # name 'currentUserThankedRecently'"). The dev loop's VERIFY already runs this,
+  # so mirror it here — previews must build the exact code the loop verified.
+  if grep -qE '^[[:space:]]*build_runner:' "$FRONTEND_DIR/pubspec.yaml" 2>/dev/null; then
+    echo "[frontend] dart run build_runner build --delete-conflicting-outputs"
+    (cd "$FRONTEND_DIR" && flutter pub get && dart run build_runner build --delete-conflicting-outputs)
+  fi
   echo "[frontend] flutter build web --release --pwa-strategy=none ${BUILD_EXTRA[*]}"
   # --pwa-strategy=none: don't generate/register the Flutter service worker, so
   # serve-nocache.py's no-store fully controls freshness (see header, trap #2).

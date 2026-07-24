@@ -479,11 +479,18 @@ def run_logmine(cfg, api, thread_id, react, fail):
         return "logmine: no new logs"
     api.send_message(cfg["chat_id"], "🔍 logmine: reading new logs…", thread_id)
     prompt = open(LOGMINE_ANALYZE).read() + "\n\n=== LOGS ===\n" + logs
+    # Feed the prompt on stdin, not as an argv string: the collected logs run to
+    # hundreds of KB and a single argument is capped at MAX_ARG_STRLEN (128 KiB),
+    # so `claude -p <prompt>` dies with OSError "argument list too long". stdin
+    # has no such cap.
     try:
-        out = subprocess.run(["claude", "-p", prompt, "--dangerously-skip-permissions"],
-                             cwd=ORCH_DIR, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT)
+        out = subprocess.run(["claude", "-p", "--dangerously-skip-permissions"],
+                             input=prompt, cwd=ORCH_DIR, capture_output=True, text=True,
+                             timeout=CLAUDE_TIMEOUT)
     except subprocess.TimeoutExpired:
         return fail("logmine analyze timed out", "the log analysis took too long and was stopped")
+    except OSError as e:
+        return fail(f"error: logmine analyze spawn failed: {e}", f"couldn't start the analysis: {e}")
     if out.returncode != 0:
         return fail(f"error: logmine analyze rc={out.returncode}",
                     f"analysis failed: {out.stderr.strip()[:300]}")

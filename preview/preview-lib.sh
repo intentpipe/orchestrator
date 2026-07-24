@@ -66,8 +66,14 @@ is_up()     { local pid; pid=$(cat "$1" 2>/dev/null || true); [ -n "$pid" ] && k
 port_busy() { ss -ltn 2>/dev/null | grep -q ":$1 "; }
 
 start_backend() {
-  echo "[backend] docker compose up -d ($PROJECT)"
-  (cd "$BACKEND_DIR" && DC up -d)
+  # --build: rebuild the backend image from current source every relaunch, so a
+  # preview reflects the latest merged BACKEND code — not just the frontend. Plain
+  # `up -d` reuses a stale image, which silently served 46h-old code (no shop /
+  # inventory / arrange endpoints) behind a fresh frontend. Docker's layer cache
+  # keeps this near-instant when nothing changed; recreating the container also
+  # re-runs any start-time migrations (e.g. bibbles' `alembic upgrade head`).
+  echo "[backend] docker compose up -d --build ($PROJECT)"
+  (cd "$BACKEND_DIR" && DC up -d --build)
 }
 
 build_frontend() {

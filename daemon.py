@@ -84,6 +84,13 @@ LOGMINE_ANALYZE = os.path.join(ORCH_DIR, "logmine", "analyze.md")
 LOGMINE_IMPLEMENT = os.path.join(ORCH_DIR, "logmine", "implement.md")
 LOGMINE_OFFERS_FILE = os.path.join(RUN_DIR, "logmine_offers.json")
 
+# decision gate: a build task can carry a `Decision:` the builder can't invent.
+# loop.sh (via the plugin's ask.sh) posts the question into the topic with
+# "Reply to this message to decide" and remembers it here — message_id →
+# {task, workspace}. A reply to that message routes to task.sh resolve, which
+# folds the answer into the task and reopens it. Written by ask.sh, read here.
+DECISION_OFFERS_FILE = os.path.join(RUN_DIR, "decision_offers.json")
+
 # machines-at-work plugin: its SKILLS run from a version-pinned install CACHE
 # (only its scripts/ run live, via MAW_SCRIPTS), so a version bump that isn't
 # reinstalled leaves headless skill runs (plan/build/unblock) executing a STALE
@@ -443,6 +450,51 @@ def save_logmine_offers(offers):
     os.replace(tmp, LOGMINE_OFFERS_FILE)
 
 
+def load_decision_offers():
+    try:
+        return json.load(open(DECISION_OFFERS_FILE))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_decision_offers(offers):
+    os.makedirs(RUN_DIR, exist_ok=True)
+    tmp = DECISION_OFFERS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(offers, f)
+    os.replace(tmp, DECISION_OFFERS_FILE)
+
+
+def resolve_decision(mid, offer, reply_text, cfg, api, thread_id, react, fail):
+    """A reply to a remembered decision question: fold the human's answer into the
+    gated task (task.sh resolve, in the task's workspace) and drop the offer so it
+    can't be answered twice. task.sh resolve reopens the task; the next build
+    implements it."""
+    text = (reply_text or "").strip()
+    if not text:
+        return fail("skip: empty decision reply", "reply with the decision text.")
+    scripts = cfg.get("maw_scripts")
+    if not scripts:
+        return fail("skip: MAW_SCRIPTS unset", "MAW_SCRIPTS is not set — can't record the decision.")
+    task, workspace = offer["task"], offer["workspace"]
+    try:
+        out = subprocess.run([os.path.join(scripts, "task.sh"), "resolve", task, text],
+                             cwd=workspace, capture_output=True, text=True, timeout=60)
+    except OSError as e:
+        return fail(f"error: resolve spawn failed: {e}", f"couldn't record the decision: {e}")
+    if out.returncode != 0:
+        return fail(f"error: task.sh resolve rc={out.returncode}",
+                    f"couldn't record the decision: {out.stderr.strip()[:300]}")
+    offers = load_decision_offers()
+    offers.pop(str(mid), None)
+    save_decision_offers(offers)
+    api.send_message(cfg["chat_id"],
+                     f"✅ decision recorded for task {task} — back in the queue; the next build implements it.",
+                     thread_id)
+    react("👌")
+    return f"decision resolved for task {task}"
+
+
 def _json_array(text):
     """First top-level JSON array in claude's stdout (it may wrap it in prose or a
     ```json fence). [] on anything unparseable."""
@@ -739,6 +791,16 @@ def process_message(msg, cfg, registry, api):
 def _route(msg, cfg, registry, api, thread_id, react, fail):
     entry = registry.get(str(thread_id))
     stripped = msg.get("text", "").strip().lower()
+
+    # A reply to a remembered decision question folds the answer into its task and
+    # reopens it. Checked first, before any keyword/note routing: the reply is free
+    # text (the actual decision), not a command, and must not be misread as one.
+    reply = msg.get("reply_to_message")
+    if reply:
+        mid = str(reply.get("message_id"))
+        offer = load_decision_offers().get(mid)
+        if offer:
+            return resolve_decision(mid, offer, msg.get("text", ""), cfg, api, thread_id, react, fail)
 
     # `status` keyword: reply into the topic it came from. In a project topic it
     # reports just that project; anywhere else (General, unregistered) it reports

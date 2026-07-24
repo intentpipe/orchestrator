@@ -16,7 +16,7 @@ Type=simple
 KillMode=process
 # claude (and other user-installed tools) live in ~/.local/bin, which the systemd
 # service PATH omits — add it so the daemon can spawn `claude` for 🧠/🚀/General.
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=%h/.local/bin:/opt/flutter/bin:/usr/local/bin:/usr/bin:/bin
 # %h = the running user's home. Adjust if the checkout lives elsewhere.
 ExecStart=%h/all-machines-at-work/server-orchestrator/daemon.py
 Restart=always

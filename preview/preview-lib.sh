@@ -39,6 +39,12 @@
 #   BUILD_EXTRA    array of extra `flutter build web` args (e.g. --dart-define=…)
 #   TMPDIR         override (Flutter's web compiler overflows the small /tmp tmpfs)
 #   pre_build      shell function; if defined, run before each build (validation)
+#   BACKEND_WAIT   1 = `docker compose up --wait` (needs healthchecks); default 0
+#   FRONTEND_REPO_DIR / BACKEND_REPO_DIR
+#                  git repos `checkout` switches; default to FRONTEND_DIR /
+#                  BACKEND_DIR, which is right when the build dir IS the repo
+#                  (both projects today). Set them when a repo root differs from
+#                  the dir compose/flutter is invoked in.
 set -euo pipefail
 
 : "${PROJECT:?preview-lib: PROJECT unset}"
@@ -53,6 +59,9 @@ set -euo pipefail
 
 # Default to an empty array (not ("") — that injects a stray empty build arg).
 declare -p BUILD_EXTRA >/dev/null 2>&1 || BUILD_EXTRA=()
+# The build dir is the repo root in both projects today; keep them overridable.
+FRONTEND_REPO_DIR="${FRONTEND_REPO_DIR:-$FRONTEND_DIR}"
+BACKEND_REPO_DIR="${BACKEND_REPO_DIR:-$BACKEND_DIR}"
 WEB_DIR="$FRONTEND_DIR/build/web"
 export PATH="$FLUTTER_PATH:$PATH"
 export TMPDIR="${TMPDIR:-$STATE_DIR/tmp}"
@@ -72,8 +81,21 @@ start_backend() {
   # inventory / arrange endpoints) behind a fresh frontend. Docker's layer cache
   # keeps this near-instant when nothing changed; recreating the container also
   # re-runs any start-time migrations (e.g. bibbles' `alembic upgrade head`).
-  echo "[backend] docker compose up -d --build ($PROJECT)"
-  (cd "$BACKEND_DIR" && DC up -d --build)
+  # --force-recreate (set by cmd_checkout via BACKEND_FORCE_RECREATE) additionally
+  # restarts containers whose image and config are unchanged. That matters after a
+  # branch switch: the backend source is bind-mounted, so `--build` alone can find
+  # nothing to do and leave the OLD container running against the NEW branch's
+  # migrations. Recreating re-runs the start-time DB work — for tyf that is
+  # DB_RESET_ON_START, which drops the schema and replays the new branch's
+  # migration chain from empty, so switching branches needs no volume surgery.
+  local extra=()
+  [ "${BACKEND_FORCE_RECREATE:-0}" = 1 ] && extra+=(--force-recreate)
+  # --wait blocks until healthchecks pass, so `checkout` returns only once the API
+  # is really serving (and its DB rebuild has finished). Opt-in: a compose file
+  # without healthchecks gains nothing and only risks a spurious timeout.
+  [ "${BACKEND_WAIT:-0}" = 1 ] && extra+=(--wait)
+  echo "[backend] docker compose up -d --build ${extra[*]} ($PROJECT)"
+  (cd "$BACKEND_DIR" && DC up -d --build "${extra[@]}")
 }
 
 build_frontend() {
@@ -156,21 +178,58 @@ cmd_down()    { stop_frontend; (cd "$BACKEND_DIR" && DC stop); }
 cmd_restart() { stop_frontend; sleep 1; build_frontend; serve_frontend; cmd_urls; }
 cmd_rebuild() { cmd_restart; }   # kept for muscle memory; identical to restart
 
-# Switch the frontend repo to a branch and redeploy in one step. `flutter pub
-# get`/build regenerate pubspec.lock with different transitive pins, leaving the
-# tree dirty; that drift then BLOCKS `git checkout`. The committed lockfile is the
-# source of truth, so restore ONLY pubspec.lock (never a blind `checkout -f`,
-# which would nuke real source edits), then check out and rebuild.
+# True when $2 names a branch in repo $1, locally or on origin. A bare
+# `git checkout <branch>` DWIMs a remote-only name into a tracking branch, so
+# both cases are checkout-able; only a name in neither is not.
+_branch_exists() {
+  git -C "$1" rev-parse --verify --quiet "refs/heads/$2" >/dev/null 2>&1 ||
+    git -C "$1" rev-parse --verify --quiet "refs/remotes/origin/$2" >/dev/null 2>&1
+}
+
+# Check out $3 in the single repo $2 ($1 = label for logging).
+#
+# `flutter pub get`/build regenerate pubspec.lock with different transitive pins,
+# leaving the tree dirty; that drift then BLOCKS `git checkout`. The committed
+# lockfile is the source of truth, so restore ONLY pubspec.lock — never a blind
+# `checkout -f`, which would nuke real source edits. Any OTHER dirt is a real
+# edit, so we let git refuse the checkout rather than discard someone's work.
+#
+# A missing branch is a warning, not an error: most task branches touch one repo
+# only, so "no such branch in core" is the normal case for a frontend-only task
+# and must still leave the other repo switched and the preview redeployed.
+_checkout_repo() {
+  local label="$1" dir="$2" branch="$3"
+  if [ ! -d "$dir/.git" ]; then
+    echo "[git/$label] $dir is not a git repo — skipping"; return 0
+  fi
+  git -C "$dir" checkout -- pubspec.lock 2>/dev/null || true
+  git -C "$dir" fetch origin --quiet 2>/dev/null || true
+  if ! _branch_exists "$dir" "$branch"; then
+    echo "[git/$label] WARNING: no branch '$branch' — staying on $(git -C "$dir" branch --show-current)"
+    return 0
+  fi
+  echo "[git/$label] checkout $branch"
+  git -C "$dir" checkout "$branch"
+  git -C "$dir" pull --ff-only --quiet 2>/dev/null || true
+  echo "[git/$label] now on $(git -C "$dir" branch --show-current) @ $(git -C "$dir" log -1 --format=%h)"
+}
+
+# Switch BOTH repos to a branch and redeploy in one step.
+#
+# Frontend-only checkout was the old behaviour and it silently served a mixed
+# build: the new UI against the previous branch's backend and database. A feature
+# lands across both repos under one branch name, so both must move together, and
+# the backend container must be recreated so the branch's migrations/seed define
+# the DB (see start_backend's --force-recreate note).
 cmd_checkout() {
   local branch="${1:?usage: $0 checkout <branch>}"
-  echo "[git] discarding disposable pubspec.lock drift (regenerated by builds)"
-  git -C "$FRONTEND_DIR" checkout -- pubspec.lock 2>/dev/null || true
-  git -C "$FRONTEND_DIR" fetch origin --quiet 2>/dev/null || true
-  echo "[git] checkout $branch"
-  git -C "$FRONTEND_DIR" checkout "$branch"
-  git -C "$FRONTEND_DIR" pull --ff-only --quiet 2>/dev/null || true
-  echo "[git] now on $(git -C "$FRONTEND_DIR" branch --show-current)"
-  cmd_restart
+  _checkout_repo frontend "$FRONTEND_REPO_DIR" "$branch"
+  _checkout_repo backend  "$BACKEND_REPO_DIR"  "$branch"
+  # Plain assignment, not a `VAR=1 cmd_up` prefix: bash keeps assignment prefixes
+  # on *function* calls in the shell after the call, so the prefix form reads as
+  # scoped while behaving globally. Set it outright and let the script exit.
+  BACKEND_FORCE_RECREATE=1
+  cmd_up
 }
 
 cmd_urls() {
@@ -208,7 +267,8 @@ preview_main() {
       echo "  down      stop the frontend server and 'docker compose stop' the backend"
       echo "  restart   recompile the frontend and re-serve (always picks up code/.env changes)"
       echo "  rebuild   recompile the frontend and re-serve (same as restart)"
-      echo "  checkout <branch>  discard pubspec.lock drift, switch branch, rebuild & serve"
+      echo "  checkout <branch>  switch BOTH repos to <branch>, recreate the backend"
+      echo "                     (rebuilds its dev DB), then recompile & serve"
       echo "  status    docker ps + frontend + tunnel state + URLs"
       echo "  urls      show the persistent preview URLs"
       echo "  logs [name] [n]   tail a state log (default web-serve, 40 lines)"

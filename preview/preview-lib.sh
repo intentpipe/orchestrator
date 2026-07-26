@@ -40,6 +40,11 @@
 #   TMPDIR         override (Flutter's web compiler overflows the small /tmp tmpfs)
 #   pre_build      shell function; if defined, run before each build (validation)
 #   BACKEND_WAIT   1 = `docker compose up --wait` (needs healthchecks); default 0
+# ── Env knobs a CALLER sets (not project config) ────────────────────────────
+#   BACKEND_FORCE_RECREATE=1  recreate containers even when image+config match
+#   BACKEND_RESET_VOLUMES=1   `down -v` first: the branch's migrations replay
+#                             against an empty DB (implies --force-recreate).
+#                             Set by `checkout` and by `relaunch --reset`.
 #   FRONTEND_REPO_DIR / BACKEND_REPO_DIR
 #                  git repos `checkout` switches; default to FRONTEND_DIR /
 #                  BACKEND_DIR, which is right when the build dir IS the repo

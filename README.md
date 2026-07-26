@@ -40,19 +40,38 @@ retros. Per-project topics and the inbound voice daemon are later phases of the 
 ## Keyword: `status`
 
 Send `status` (text) in **any** topic and the daemon replies with a live cross-project report —
-each project's repos and their git branch (`*` = dirty working tree), plus whether the backend and
-frontend ports are listening:
+per served service: whether its port is listening, its **public preview URL**, and the repo,
+**branch** and sha that URL is serving (`*` = dirty working tree):
 
 ```
 📊 Project status
 
 • bibbles
-   branches: backend main*, frontend main*
-   running:  backend: 🟢 :8810 · frontend: 🟢 :3031
+   frontend: 🟢 :3031  https://bibbles.squadrafrizzante.com
+      ↳ frontend @ main (223c789)
+   backend:  🟢 :8810  https://bibbles-api.squadrafrizzante.com
+      ↳ backend @ main (3a6d1da)
 • tell-your-friends
-   branches: app_mobile dev*, core dev*
-   running:  backend: 🟢 :8800 · frontend: 🟢 :3030
+   frontend: 🟢 :3030  https://tyf.squadrafrizzante.com
+      ↳ app_mobile @ feature/tyf-179-visit-notifications (8fc5dac)
+   backend:  🟢 :8800  https://tyf-api.squadrafrizzante.com
+      ↳ core @ dev (0947218)
+   ⚠️ MIXED CHECKOUT: core has 'feature/tyf-179-visit-notifications' but serves dev — the preview is a mixture
 ```
+
+A preview URL is stable, so the branch behind it is the only thing that says *what* it
+is serving. Which repo backs which URL is declared per service in `ports.json`
+(`url` + `repo`); repos that back no service are still listed under `other repos`.
+
+**Not every branch split is wrong**, and the report distinguishes them — a warning that
+fires on the normal case is a warning you learn to ignore:
+
+| Repos | Verdict |
+|---|---|
+| Same branch everywhere | nothing said |
+| One repo on a feature branch, the others on the default branch **and they have no such branch** | `ℹ️ one-sided change … — expected` — a frontend-only (or backend-only) PR has nothing to check out on the other side |
+| A repo **has** the feature branch but is serving the default branch | `⚠️ MIXED CHECKOUT` — this is the real defect |
+| Repos on unrelated non-default branches | `⚠️ MIXED CHECKOUT` — the checkout flow never produces that, so a tree is stale |
 
 It short-circuits before topic routing, so it never writes an update note. Implementation lives in
 `system-scripts/status.py` (pure stdlib; also runnable from the shell to print the same report) and
@@ -120,8 +139,32 @@ checkout options — one Telegram message each:
   frontend-only PR leaves the backend on `dev`.
 
 **React to one of those messages** and the daemon checks its branches out in each
-repo (dirty trees are left untouched, never clobbered) and runs `relaunch`, which
-rebuilds the preview stack and posts the fresh **frontend URL** back into the topic.
+repo, then runs `relaunch --reset`, which rebuilds the preview stack and posts the
+fresh **URLs together with the branch behind each** back into the topic.
+
+Four rules make what you then look at trustworthy — each of them fixes a way the
+preview used to lie about itself:
+
+- **All repos or none.** Every repo is checked first; if any one can't be switched
+  (a genuinely dirty tree) *nothing* is checked out and nothing is rebuilt — you get
+  a message saying which repo and why. A frontend on the PR branch talking to the
+  previous branch's backend looks fine and behaves wrongly, so the old state is the
+  safer answer.
+- **A repo the change doesn't touch goes to the default branch — not "wherever it
+  was".** Most changes are one-sided, so a frontend-only PR *must* leave the backend
+  on `dev`: that is a complete state, not a mixture, and the option message says so
+  (`core: dev   (no PR on this branch — untouched by this change)`). What it must not
+  do is leave that repo standing on the *previous* checkout's feature branch, which is
+  what "no such branch here, staying put" used to do — one two-repo feature bleeding
+  into the next, one-sided one.
+- **Lockfile churn is not an edit.** Building a preview rewrites `pubspec.lock` /
+  `uv.lock`; those are restored from the commit before the dirty check, so routine
+  build drift can't get a repo skipped. Any other dirt is a real edit and is never
+  clobbered (pull.py's rule).
+- **The backend's docker volumes are reset** (`down -v`, then `up --force-recreate`).
+  A branch can carry different migrations; without this the new code serves the
+  previous branch's schema and rows out of a named volume that survives restarts.
+  Only the branch-switch path resets — a plain `relaunch` keeps the dev database.
 
 ```
 🔀 checkout · tell-your-friends — react to an option to check it out, build it, and get the frontend URL:
@@ -140,6 +183,18 @@ options). **Receiving reactions requires the bot to be a chat admin**, and the
 daemon requests `message_reaction` in `getUpdates`' `allowed_updates` (both are
 already wired). A reaction by a non-allow-listed user, a cleared reaction, or a
 reaction on any non-offer message does nothing.
+
+## Keyword: `relaunch`
+
+Send `relaunch` (text) in a **project topic** to rebuild that project's preview stack
+from whatever is **currently** checked out — no branch switch, dev database kept — and
+post its URLs with the branch behind each. Use `checkout` instead when you want to move
+to a PR's branches (that path resets the backend volumes; this one deliberately doesn't,
+so a `relaunch` never throws away the dev data you were looking at).
+
+Runs detached (`relaunch <name>`; the rebuild takes minutes) and speaks for itself in the
+topic when it's done. The script also runs from a shell: `relaunch [--reset] [project]`,
+no argument = every registered project.
 
 ## Keyword: `help`
 

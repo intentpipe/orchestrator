@@ -1,11 +1,11 @@
 {
-  "_comment": "Per-project services the status collector HTTP-probes to decide FE/BE state (🟢 serving / 🟠 bound-but-erroring / 🔴 down). Keyed by the project name in the daemon registry. Each service is {port, health-path}; a bare int also works (path defaults to /). Port numbers are single-sourced from projects/PORTS.md — keep them in sync when you add or move a service.",
+  "_comment": "Per-project services the status collector HTTP-probes to decide FE/BE state (🟢 serving / 🟠 bound-but-erroring / 🔴 down). Keyed by the project name in the daemon registry. Each service is {port, health-path, url, repo}; a bare int also works (path defaults to /, no URL). `url` is the public preview URL the tunnel maps to that port and `repo` names the agents.env repo whose branch is being served there — status reports the two together, because a URL without the branch behind it can't tell you what you are looking at. Port numbers are single-sourced from projects/PORTS.md — keep them in sync when you add or move a service.",
   "bibbles": {
-    "backend": { "port": 8810, "health": "/health" },
-    "frontend": { "port": 3031, "health": "/" }
+    "backend": { "port": 8810, "health": "/health", "url": "https://bibbles-api.squadrafrizzante.com", "repo": "backend" },
+    "frontend": { "port": 3031, "health": "/", "url": "https://bibbles.squadrafrizzante.com", "repo": "frontend" }
   },
   "tell-your-friends": {
-    "backend": { "port": 8800, "health": "/health" },
-    "frontend": { "port": 3030, "health": "/" }
+    "backend": { "port": 8800, "health": "/health", "url": "https://tyf-api.squadrafrizzante.com", "repo": "core" },
+    "frontend": { "port": 3030, "health": "/", "url": "https://tyf.squadrafrizzante.com", "repo": "app_mobile" }
   }
 }

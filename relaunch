@@ -5,19 +5,36 @@
 #   1. tears the whole preview stack DOWN   (docker containers + flutter + tunnels)
 #   2. brings it back UP FRESH              (containers recreated, frontend
 #                                            recompiled, brand-new cloudflared tunnels)
-#   3. POSTS the live frontend URL into that project's Telegram forum topic
+#   3. POSTS the live URLs — each with the repo + branch + sha behind it — into
+#      that project's Telegram forum topic
 #
-# The per-project mechanics live in each project's own <name>-dev.sh (down/up/urls);
-# relaunch only orchestrates them and routes the resulting URL to the right channel.
-# Topic id + workspace come from the registry — the single source of truth.
+# The per-project mechanics live in each project's own <name>-dev.sh (up/urls);
+# relaunch only orchestrates them and routes the resulting URLs to the right
+# channel. Topic id + workspace come from the registry — the single source of truth.
 #
-# Usage:  relaunch [project-name]      # no arg = every registered project
+# --reset additionally drops the backend's docker VOLUMES before bringing it up,
+# so the checked-out branch's migration chain replays against an empty database.
+# That is the mode a branch switch needs (checkout.py --build passes it): without
+# it a "fresh" preview can serve the previous branch's schema and rows out of a
+# named volume that survives every restart.
+#
+# Usage:  relaunch [--reset] [project-name]      # no name = every registered project
 set -uo pipefail
 
 ORCH_HOME="${AGENT_ORCH_HOME:-$HOME/.agent-orchestrator}"
 REGISTRY="$ORCH_HOME/registry.json"
 ENV_FILE="$ORCH_HOME/telegram.env"
-FILTER="${1:-}"
+RESET=0
+FILTER=""
+for arg in "$@"; do
+  case "$arg" in
+    --reset) RESET=1 ;;
+    -*)      echo "relaunch: unknown flag $arg" >&2; exit 2 ;;
+    *)       FILTER="$arg" ;;
+  esac
+done
+reset_note=""
+[ "$RESET" = 1 ] && reset_note=" (backend volumes reset)"
 
 [ -f "$REGISTRY" ] || { echo "relaunch: no registry at $REGISTRY" >&2; exit 1; }
 
@@ -80,17 +97,19 @@ while IFS=$'\t' read -r topic name workspace; do
     sleep 1
   fi
 
-  echo "[relaunch] rebuild (fresh frontend) + up (backend) ..."
+  echo "[relaunch] up (backend$reset_note) + fresh frontend build ..."
   # Redirect to a FILE, never $(...): the dev scripts launch a long-lived static
   # web server in the background, and command substitution would block on its
   # still-open pipe forever. A file redirect returns as soon as the commands
   # finish; `timeout` is only a backstop in case a dev script itself wedges.
-  # `rebuild` RECOMPILES the frontend from the freshly-checked-out branch (a plain
-  # `up` would only re-serve the stale existing build); `up` then ensures the
-  # backend is running (its serve step no-ops since rebuild already serves).
+  # One `up` is enough: preview-lib's up starts the backend and ALWAYS recompiles
+  # the frontend before serving it. (It used to be `rebuild && up`, from before
+  # that guarantee existed — which paid for the ~80s release build twice.)
+  # BACKEND_RESET_VOLUMES is read by preview-lib's start_backend.
   uplog="$(mktemp)"
-  timeout 420 bash -c 'cd "$1" && bash "$2" rebuild && bash "$2" up' _ "$root" "$dev" >"$uplog" 2>&1 \
-    || echo "[relaunch] rebuild/up did not exit cleanly (see below)"
+  BACKEND_RESET_VOLUMES="$RESET" \
+    timeout 600 bash -c 'cd "$1" && bash "$2" up' _ "$root" "$dev" >"$uplog" 2>&1 \
+    || echo "[relaunch] up did not exit cleanly (see below)"
   cat "$uplog"
 
   # Every dev script's `urls` tags its frontend line with "(static release" (and
@@ -100,6 +119,11 @@ while IFS=$'\t' read -r topic name workspace; do
   # marker instead. Persistent named tunnel: the URL is the fixed
   # https://<name>.<domain> (was an ephemeral *.trycloudflare.com), so match any https host.
   url="$(grep -i 'static release' "$uplog" | grep -oE 'https://[A-Za-z0-9.-]+' | head -1)"
+  # The whole URL block from the LAST `urls` print — each URL with the repo,
+  # branch and sha it is serving (and a MIXED CHECKOUT warning when the two repos
+  # disagree). Posting it verbatim is what makes "which branch am I looking at?"
+  # answerable from the phone, instead of a bare link that could be anything.
+  block="$(awk '/^=== Preview URLs/ {buf = ""} {if (buf != "" || /^=== Preview URLs/) buf = buf $0 "\n"} END {printf "%s", buf}' "$uplog")"
   rm -f "$uplog"
 
   if [ -z "$url" ]; then
@@ -108,7 +132,9 @@ while IFS=$'\t' read -r topic name workspace; do
     continue
   fi
   echo "[relaunch] $name frontend: $url"
-  post "$topic" "🚀 $name relaunched — frontend is live: $url"
+  post "$topic" "🚀 $name relaunched$reset_note
+
+$block"
 done < <(rows)
 
 [ "$any" = 1 ] || { echo "relaunch: no matching project${FILTER:+ \"$FILTER\"}" >&2; exit 1; }

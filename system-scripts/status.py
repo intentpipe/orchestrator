@@ -8,8 +8,12 @@ code). Joins two sources:
                                     (the daemon's topic→workspace map, reused)
   system-scripts/ports.json         per-project FE/BE host ports to probe
 
-For each project it reports, per code repo, the current git branch (+ `*` if the
-working tree is dirty), and whether the backend/frontend ports are listening.
+For each project it reports each served service — port state, its public preview
+URL, and the repo + branch + sha behind that URL (+ `*` if the working tree is
+dirty). When the repos are on different branches it says which kind of split that
+is: expected (a one-sided change — the other repo simply has no such branch) or a
+MIXED CHECKOUT, where a repo has the feature branch but isn't on it — what "the
+frontend is showing the PR but the backend isn't" looks like from here.
 Pure stdlib, no deps — matches daemon.py so the daemon can shell out to it the
 same way it does transcribe.sh.
 
@@ -80,11 +84,14 @@ def _git(repo, *args):
 
 
 def _branch(repo):
+    """"<branch>[*] (<sha>)" — `*` = dirty tree. The sha matters as much as the
+    name: a branch that moved (a PR updated with new commits) is the same name
+    with a different tip, and a preview built before that push is stale."""
     if not os.path.isdir(os.path.join(repo, ".git")):
         return "no-git"
     br = _git(repo, "rev-parse", "--abbrev-ref", "HEAD") or "?"
     dirty = _git(repo, "status", "--porcelain")
-    return f"{br}{'*' if dirty else ''}"
+    return f"{br}{'*' if dirty else ''} ({_git(repo, 'log', '-1', '--format=%h') or '?'})"
 
 
 def _probe(port, path="/"):
@@ -112,17 +119,67 @@ def _probe(port, path="/"):
 _ICON = {"up": "🟢", "erroring": "🟠", "down": "🔴"}
 
 
-def _svc(ports, key):
-    """One service line. `ports[key]` is either a bare port int or
-    {"port": int, "health": "/path"}."""
+def _svc(ports, key, branches):
+    """Lines for one service. `ports[key]` is a bare port int, or
+    {"port", "health", "url", "repo"} — with `url`/`repo` the report names the
+    public URL and, under it, the repo + branch + sha it is currently serving.
+    That pairing is the point: a preview URL is stable, so the only thing that
+    tells you WHAT it is serving is the branch behind it."""
     spec = ports.get(key)
     port = spec.get("port") if isinstance(spec, dict) else spec
     if not port:
-        return f"{key}: n/a"
+        return [f"   {key + ':':<9} n/a"]
     path = spec.get("health", "/") if isinstance(spec, dict) else "/"
     state, code = _probe(port, path)
     tail = f":{port} ({code})" if state == "erroring" and code else f":{port}"
-    return f"{key}: {_ICON[state]} {tail}"
+    url = spec.get("url") if isinstance(spec, dict) else None
+    lines = [f"   {key + ':':<9} {_ICON[state]} {tail}" + (f"  {url}" if url else "")]
+    repo = spec.get("repo") if isinstance(spec, dict) else None
+    if repo:
+        lines.append(f"      ↳ {repo} @ {branches.get(repo, '(not in agents.env)')}")
+    return lines
+
+
+def _default_branch(workspace):
+    """DEFAULT_BRANCH from the workspace's agents.env; `main` when unset. The
+    branch a repo sits on when a change doesn't touch it."""
+    try:
+        with open(os.path.join(workspace, "agents.env")) as f:
+            for line in f:
+                if line.strip().startswith("DEFAULT_BRANCH="):
+                    return line.strip().split("=", 1)[1].strip().strip('"').strip("'") or "main"
+    except OSError:
+        pass
+    return "main"
+
+
+def _split_note(repo_paths, branches, default):
+    """The one line to say about repos being on different branches — or None.
+
+    Not every split is wrong. Most changes touch one repo only, so a
+    frontend-only PR *correctly* leaves the backend on the default branch;
+    flagging that would cry wolf on the common case. What is wrong is a repo
+    sitting on the default branch when the feature branch exists for it too —
+    that is the frontend-showing-the-PR-but-not-the-backend defect.
+    """
+    names = {n: b.split()[0].rstrip("*") for n, b in branches.items()}
+    if len(set(names.values())) <= 1:
+        return None
+    feature = {n: b for n, b in names.items() if b != default}
+    baseline = [n for n, b in names.items() if b == default]
+    if len(set(feature.values())) > 1:
+        return ("⚠️ MIXED CHECKOUT: " + ", ".join(f"{n} on {b}" for n, b in sorted(names.items()))
+                + " — unrelated branches, so at least one is stale")
+    branch = next(iter(feature.values()))
+    # A repo on the default branch that HAS the feature branch should be on it.
+    stale = [n for n in baseline
+             if _git(repo_paths[n], "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") is not None
+             or _git(repo_paths[n], "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}") is not None]
+    if stale:
+        return (f"⚠️ MIXED CHECKOUT: {', '.join(stale)} has '{branch}' but serves {default} "
+                "— the preview is a mixture")
+    return (f"ℹ️ one-sided change: {', '.join(sorted(feature))} on '{branch}'; "
+            f"{', '.join(sorted(baseline))} has no such branch and serves {default} — expected")
 
 
 def build_report(only_workspace=None):
@@ -141,12 +198,21 @@ def build_report(only_workspace=None):
         lines.append(f"• {p['name']}")
         ws = p["workspace"]
         repos = _parse_agents_env(os.path.join(ws, "agents.env"))
-        if repos:
-            lines.append("   branches: " + ", ".join(f"{n} {_branch(path)}" for n, path in repos))
-        else:
-            lines.append(f"   branches: (no agents.env at {ws})")
+        branches = {n: _branch(path) for n, path in repos}
         ports = ports_map.get(p["name"], {})
-        lines.append("   running:  " + " · ".join([_svc(ports, "backend"), _svc(ports, "frontend")]))
+        for key in ("frontend", "backend"):
+            lines += _svc(ports, key, branches)
+        # Repos not bound to a served port still belong in the report — they are
+        # part of the checkout state even when nothing serves them directly.
+        rest = [n for n in branches
+                if n not in {s.get("repo") for s in ports.values() if isinstance(s, dict)}]
+        if rest:
+            lines.append("   other repos: " + ", ".join(f"{n} @ {branches[n]}" for n in rest))
+        elif not repos:
+            lines.append(f"   repos: (no agents.env at {ws})")
+        note = _split_note(dict(repos), branches, _default_branch(ws))
+        if note:
+            lines.append("   " + note)
     return "\n".join(lines)
 
 

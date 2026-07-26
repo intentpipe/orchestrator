@@ -88,8 +88,20 @@ start_backend() {
   # migrations. Recreating re-runs the start-time DB work — for tyf that is
   # DB_RESET_ON_START, which drops the schema and replays the new branch's
   # migration chain from empty, so switching branches needs no volume surgery.
+  # BACKEND_RESET_VOLUMES=1 (set by cmd_checkout and by `relaunch --reset`) tears
+  # the stack down WITH ITS VOLUMES first, so the branch's migration chain replays
+  # against an empty database. --force-recreate alone only re-runs a start-time
+  # rebuild for a project that has one (tyf's DB_RESET_ON_START); a project
+  # without that flag would keep the previous branch's schema and rows sitting in
+  # a named volume, which is exactly how a "fresh" preview served stale data.
+  # Only ever used on an explicit branch switch/reset — a plain up/restart must
+  # not throw away the dev database.
+  if [ "${BACKEND_RESET_VOLUMES:-0}" = 1 ]; then
+    echo "[backend] docker compose down -v (resetting volumes for a clean branch state)"
+    (cd "$BACKEND_DIR" && DC down -v --remove-orphans) || echo "[backend] down -v reported errors (continuing)"
+  fi
   local extra=()
-  [ "${BACKEND_FORCE_RECREATE:-0}" = 1 ] && extra+=(--force-recreate)
+  { [ "${BACKEND_FORCE_RECREATE:-0}" = 1 ] || [ "${BACKEND_RESET_VOLUMES:-0}" = 1 ]; } && extra+=(--force-recreate)
   # --wait blocks until healthchecks pass, so `checkout` returns only once the API
   # is really serving (and its DB rebuild has finished). Opt-in: a compose file
   # without healthchecks gains nothing and only risks a spurious timeout.
@@ -229,13 +241,49 @@ cmd_checkout() {
   # on *function* calls in the shell after the call, so the prefix form reads as
   # scoped while behaving globally. Set it outright and let the script exit.
   BACKEND_FORCE_RECREATE=1
+  # A branch switch also resets the volumes: the previous branch's schema/rows
+  # live in a named volume that --force-recreate does not touch.
+  BACKEND_RESET_VOLUMES=1
   cmd_up
 }
 
+# "<branch> (<sha>[, dirty])" for a repo dir — what a URL is actually serving.
+_repo_state() {
+  local dir="$1" br sha
+  [ -d "$dir/.git" ] || { echo "not-a-git-repo"; return; }
+  br=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || br="?"
+  sha=$(git -C "$dir" log -1 --format=%h 2>/dev/null) || sha="?"
+  if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+    echo "$br ($sha, dirty)"
+  else
+    echo "$br ($sha)"
+  fi
+}
+
+# A URL is only meaningful together with the code behind it: a frontend served
+# from a PR branch against a backend still on the default branch looks fine and
+# behaves wrongly. So every place that prints a URL prints its repo + branch, and
+# a split between the two is called out rather than left for the user to notice.
 cmd_urls() {
+  local fe be
+  fe=$(_repo_state "$FRONTEND_REPO_DIR"); be=$(_repo_state "$BACKEND_REPO_DIR")
   echo "=== Preview URLs (persistent Cloudflare tunnel) ==="
   echo "  Frontend : $FRONTEND_URL   (static release, local :$FRONTEND_PORT)"
+  echo "             ↳ $(basename "$FRONTEND_REPO_DIR") @ $fe"
   echo "  API      : $API_URL   (local :$BACKEND_PORT, + /docs for Swagger)"
+  echo "             ↳ $(basename "$BACKEND_REPO_DIR") @ $be"
+  [ "${fe%% *}" = "${be%% *}" ] \
+    || echo "  ⚠️ MIXED CHECKOUT: frontend and backend are on different branches"
+}
+
+# Machine-readable "<repo-dir-name>\t<branch>\t<sha>" per served repo, for callers
+# that want the state without parsing the URL block (e.g. a status collector).
+cmd_branches() {
+  local dir st
+  for dir in "$FRONTEND_REPO_DIR" "$BACKEND_REPO_DIR"; do
+    st=$(_repo_state "$dir")
+    printf '%s\t%s\t%s\n' "$(basename "$dir")" "${st%% *}" "$(echo "$st" | sed -E 's/^[^ ]+ \((.*)\)$/\1/')"
+  done
 }
 
 cmd_status() {
@@ -260,17 +308,19 @@ preview_main() {
     checkout|switch)                      cmd_checkout "${2:-}" ;;
     status)                               cmd_status ;;
     urls)                                 cmd_urls ;;
+    branches)                             cmd_branches ;;
     logs)                                 cmd_logs "${2:-web-serve}" "${3:-40}" ;;
     *)
-      echo "usage: $0 {up|down|restart|rebuild|checkout <branch>|status|urls|logs [name] [n]}"
+      echo "usage: $0 {up|down|restart|rebuild|checkout <branch>|status|urls|branches|logs [name] [n]}"
       echo "  up        start backend (docker) + recompile & serve the frontend on :$FRONTEND_PORT"
       echo "  down      stop the frontend server and 'docker compose stop' the backend"
       echo "  restart   recompile the frontend and re-serve (always picks up code/.env changes)"
       echo "  rebuild   recompile the frontend and re-serve (same as restart)"
-      echo "  checkout <branch>  switch BOTH repos to <branch>, recreate the backend"
-      echo "                     (rebuilds its dev DB), then recompile & serve"
+      echo "  checkout <branch>  switch BOTH repos to <branch>, reset the backend"
+      echo "                     volumes + recreate it, then recompile & serve"
       echo "  status    docker ps + frontend + tunnel state + URLs"
-      echo "  urls      show the persistent preview URLs"
+      echo "  urls      show the persistent preview URLs + the branch behind each"
+      echo "  branches  repo/branch/sha per served repo, tab-separated"
       echo "  logs [name] [n]   tail a state log (default web-serve, 40 lines)"
       exit 1 ;;
   esac

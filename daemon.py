@@ -27,8 +27,9 @@ Keyword `checkout` (in a project topic) posts that project's checkout options �
 the default-branch baseline plus one per open-PR feature branch (repos without a
 PR on that branch stay on the default; that's the frontend/backend-only case) —
 one Telegram message each, remembered by message_id. A message_reaction on one of
-those messages (allow-listed user) checks its branches out and relaunches the
-preview stack, which posts the fresh frontend URL. Receiving reactions needs the
+those messages (allow-listed user) checks its branches out — all repos or none —
+and relaunches the preview stack with the backend volumes reset (the branch may
+carry different migrations), which posts the fresh URLs and the branch serving each. Receiving reactions needs the
 bot to be a chat admin and `message_reaction` in getUpdates' allowed_updates.
 
 Keyword `relaunch` (in a project topic) rebuilds just that project's preview stack
@@ -137,8 +138,10 @@ HELP = (
     "• 🩹 or unblock — diagnose why the build queue is stuck and auto-resolve the "
     "safe cases (finished-but-unmerged, clean retry); the rest are escalated with a reason.\n"
     "• checkout — post the checkout options (default branch + each open-PR "
-    "state); react to one to check it out, rebuild, and get the frontend URL.\n"
-    "• relaunch — rebuild this project's preview stack (fresh) and post its URL.\n"
+    "state); react to one to check ALL repos out, rebuild with the backend "
+    "volumes reset, and get the URLs with the branch behind each.\n"
+    "• relaunch — rebuild this project's preview stack from the CURRENT checkout "
+    "(no branch switch, dev database kept) and post its URLs + branches.\n"
     "• anything else (text or voice) — dropped as an intent note for the next plan.\n"
     "\n"
     "In the General topic:\n"
@@ -628,8 +631,9 @@ def process_reaction(r, cfg, api):
         return f"skip: checkout build already running for {offer['name']}"
     pid = build_checkout(offer)
     api.send_message(cfg["chat_id"],
-                     f"👌 checking out [{offer['label']}] and rebuilding {offer['name']} — "
-                     f"the frontend URL will follow.", offer["topic"])
+                     f"👌 checking out [{offer['label']}] and rebuilding {offer['name']} "
+                     f"(backend volumes reset) — the URLs and the branches behind them "
+                     f"will follow.", offer["topic"])
     return f"checkout+build started for {offer['name']} [{offer['label']}] (pid {pid})"
 
 

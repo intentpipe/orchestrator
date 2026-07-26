@@ -30,10 +30,20 @@ import os
 import subprocess
 import sys
 
+ORCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ORCH_DIR)
 import status  # reuse _projects, _parse_agents_env, _git — one source of fleet truth
 
-RELAUNCH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "relaunch")
+RELAUNCH = os.path.join(ORCH_DIR, "relaunch")
+
+# Building a preview regenerates lockfiles with different transitive pins (flutter
+# pub get rewrites pubspec.lock; uv rewrites uv.lock), which leaves the tree dirty
+# — and a dirty repo used to be SKIPPED here while the other one switched, which
+# served a new frontend against the previous branch's backend. The committed
+# lockfile is the source of truth, so restore exactly those before judging
+# dirtiness; any OTHER dirt is a real edit and still blocks the switch.
+LOCKFILES = ("pubspec.lock", "uv.lock", "poetry.lock", "package-lock.json")
 
 
 def _default_branch(workspace):
@@ -132,36 +142,97 @@ def render(workspace):
     return "\n".join(out).rstrip()
 
 
+def _restore_lockfiles(path):
+    """Discard lockfile-only drift (see LOCKFILES) so a preview build's churn
+    doesn't read as a real edit."""
+    for f in LOCKFILES:
+        if os.path.exists(os.path.join(path, f)):
+            subprocess.run(["git", "-C", path, "checkout", "--", f],
+                           capture_output=True, text=True, timeout=30)
+
+
+def _post(offer, text):
+    """Say something in the project's topic. `checkout.py --build` runs DETACHED
+    from the daemon and is not job-tracked, so a failure it doesn't announce is
+    invisible — the user just waits for a URL that never arrives. Best-effort:
+    never let a comms problem break the build."""
+    try:
+        import daemon  # noqa: PLC0415 — optional, and importing it must not be fatal
+        env = daemon.load_env(daemon.ENV_FILE)
+        token, chat = env.get("TELEGRAM_BOT_TOKEN"), env.get("TELEGRAM_CHAT_ID")
+        if not token or not chat:
+            return
+        daemon.TelegramAPI(token).send_message(chat, text, offer.get("topic"))
+    except Exception as e:
+        print(f"[checkout] telegram post failed (non-fatal): {e}", flush=True)
+
+
 def build(offer):
     """Realise one option: check out its branches per repo, then relaunch (which
-    rebuilds the preview stack and posts the frontend URL to the project's topic).
+    rebuilds the preview stack and posts the URLs + their branches to the topic).
 
-    `offer` = {name, workspace, branches:{repo:branch}}. A dirty repo is left
-    untouched and reported — never clobbered — mirroring pull.py's rule."""
+    `offer` = {name, workspace, topic, branches:{repo:branch}}.
+
+    A repo that can't be switched ABORTS the whole build — nothing is checked out
+    and nothing is rebuilt. A half-applied option is precisely the bug this flow
+    exists to prevent (frontend on the PR branch, backend still on the default
+    one): it is invisible in the served app, so the old state plus a loud message
+    beats a silent mixture. A dirty tree is still never clobbered — pull.py's
+    rule — beyond the lockfile drift above."""
     repos = dict(status._parse_agents_env(os.path.join(offer["workspace"], "agents.env")))
-    notes = []
+    notes, failed, todo = [], [], []
+    # Pass 1 — decide for EVERY repo before touching any: an option that can't be
+    # applied in full shouldn't leave half of it applied.
     for rname, branch in offer["branches"].items():
         path = repos.get(rname)
         if not path or not os.path.isdir(os.path.join(path, ".git")):
             notes.append(f"{rname}: no git repo, skipped")
             continue
+        _restore_lockfiles(path)
+        on = status._git(path, "rev-parse", "--abbrev-ref", "HEAD")
         if status._git(path, "status", "--porcelain"):
-            notes.append(f"{rname}: dirty, left as-is")
+            # Already on the wanted branch: a dirty tree is servable (and someone
+            # may be mid-edit), so keep it — only a *switch* is refused.
+            if on == branch:
+                notes.append(f"{rname}: on {branch} (dirty, left as-is)")
+                continue
+            notes.append(f"{rname}: DIRTY on {on} — refusing to switch to {branch}")
+            failed.append(rname)
             continue
+        todo.append((rname, path, branch))
+    if failed:
+        print("[checkout] " + " · ".join(notes), flush=True)
+        _post(offer, "⚠️ checkout of [{}] aborted — {} could not be switched, so nothing "
+                     "was checked out and the preview was NOT rebuilt (serving a mixed "
+                     "frontend/backend is worse than serving the old state).\n\n{}".format(
+                         offer.get("label", "?"), ", ".join(failed), "\n".join(notes)))
+        return
+    # Pass 2 — apply.
+    for rname, path, branch in todo:
         subprocess.run(["git", "-C", path, "fetch", "origin", branch],
                        capture_output=True, text=True, timeout=120)
         co = subprocess.run(["git", "-C", path, "checkout", branch],
                             capture_output=True, text=True, timeout=60)
         if co.returncode != 0:
-            notes.append(f"{rname}: checkout {branch} failed ({co.stderr.strip().splitlines()[-1] if co.stderr.strip() else 'error'})")
+            why = co.stderr.strip().splitlines()[-1] if co.stderr.strip() else "error"
+            notes.append(f"{rname}: checkout {branch} FAILED ({why})")
+            failed.append(rname)
             continue
         # fast-forward to the remote tip so a review sees the latest PR commit
         subprocess.run(["git", "-C", path, "merge", "--ff-only", f"origin/{branch}"],
                        capture_output=True, text=True, timeout=60)
-        notes.append(f"{rname}: on {branch}")
+        notes.append(f"{rname}: on {branch} @ {status._git(path, 'log', '-1', '--format=%h') or '?'}")
     print("[checkout] " + " · ".join(notes), flush=True)
-    # relaunch rebuilds whatever is now checked out and posts the URL itself.
-    subprocess.run([RELAUNCH, offer["name"]])
+    if failed:
+        _post(offer, "⚠️ checkout of [{}] aborted — {} could not be switched, so the "
+                     "preview was NOT rebuilt (serving a mixed frontend/backend is worse "
+                     "than serving the old state).\n\n{}".format(
+                         offer.get("label", "?"), ", ".join(failed), "\n".join(notes)))
+        return
+    # relaunch rebuilds whatever is now checked out and posts the URLs itself.
+    # --reset: the branch may carry different migrations, so the backend's volumes
+    # go with it — otherwise the new code serves the old branch's database.
+    subprocess.run([RELAUNCH, "--reset", offer["name"]])
 
 
 def main(argv):

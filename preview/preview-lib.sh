@@ -214,16 +214,38 @@ _branch_exists() {
 # A missing branch is a warning, not an error: most task branches touch one repo
 # only, so "no such branch in core" is the normal case for a frontend-only task
 # and must still leave the other repo switched and the preview redeployed.
+# The branch a repo falls back to when a feature doesn't exist in it: DEFAULT_BRANCH
+# if the project declares one, else whatever origin/HEAD points at, else main.
+_default_branch() {
+  local dir="$1" ref
+  [ -z "${DEFAULT_BRANCH:-}" ] || { echo "$DEFAULT_BRANCH"; return; }
+  if ref=$(git -C "$dir" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null); then
+    echo "${ref#origin/}"; return
+  fi
+  echo main
+}
+
 _checkout_repo() {
-  local label="$1" dir="$2" branch="$3"
+  local label="$1" dir="$2" branch="$3" fallback
   if [ ! -d "$dir/.git" ]; then
     echo "[git/$label] $dir is not a git repo — skipping"; return 0
   fi
   git -C "$dir" checkout -- pubspec.lock 2>/dev/null || true
   git -C "$dir" fetch origin --quiet 2>/dev/null || true
+  # A branch that doesn't exist here means the change touches only the OTHER repo
+  # — the normal frontend-only / backend-only case. The right state for this repo
+  # is then the default branch, NOT wherever it happens to be standing: "stay put"
+  # left the previous checkout's feature branch in place, so switching from a
+  # two-repo feature to a frontend-only one silently kept the old backend. Falling
+  # back makes every checkout a complete, reproducible state.
   if ! _branch_exists "$dir" "$branch"; then
-    echo "[git/$label] WARNING: no branch '$branch' — staying on $(git -C "$dir" branch --show-current)"
-    return 0
+    fallback=$(_default_branch "$dir")
+    if [ "$fallback" = "$branch" ] || ! _branch_exists "$dir" "$fallback"; then
+      echo "[git/$label] WARNING: neither '$branch' nor a default branch here — staying on $(git -C "$dir" branch --show-current)"
+      return 0
+    fi
+    echo "[git/$label] no '$branch' here (change doesn't touch this repo) — falling back to $fallback"
+    branch="$fallback"
   fi
   echo "[git/$label] checkout $branch"
   git -C "$dir" checkout "$branch"
@@ -265,20 +287,61 @@ _repo_state() {
   fi
 }
 
+# Classify a frontend/backend branch split. NOT every split is wrong: most changes
+# touch one repo only, so "frontend on feature/x, backend on dev" is the intended,
+# complete state for a frontend-only PR — warning about it would cry wolf on the
+# common case. What is wrong is a repo standing on the WRONG branch while the
+# right one exists for it. So:
+#   aligned  — same branch in both.
+#   split    — the other repo has no such branch and is on its default branch:
+#              a one-sided change, correctly served.
+#   mixed    — the branch DOES exist in the other repo but isn't checked out (the
+#              real defect), or both sit on unrelated non-default branches.
+# Echoes the kind; the caller words the message.
+_split_kind() {
+  local feb="$1" beb="$2" fed bed
+  [ "$feb" != "$beb" ] || { echo aligned; return; }
+  fed=$(_default_branch "$FRONTEND_REPO_DIR"); bed=$(_default_branch "$BACKEND_REPO_DIR")
+  # Both on their own default branch — the baseline. (Two repos may name their
+  # default differently, so different strings here are still "aligned".)
+  if [ "$feb" = "$fed" ] && [ "$beb" = "$bed" ]; then echo aligned; return; fi
+  # Both off-default, on unrelated branches: never a state the checkout flow
+  # produces, so somebody's tree is stale.
+  if [ "$feb" != "$fed" ] && [ "$beb" != "$bed" ]; then echo mixed; return; fi
+  # Exactly one repo carries a feature branch. Expected only if the other genuinely
+  # doesn't have that branch; if it does, it should be on it.
+  if [ "$feb" != "$fed" ]; then
+    _branch_exists "$BACKEND_REPO_DIR" "$feb" && { echo mixed; return; }
+  else
+    _branch_exists "$FRONTEND_REPO_DIR" "$beb" && { echo mixed; return; }
+  fi
+  echo split
+}
+
 # A URL is only meaningful together with the code behind it: a frontend served
 # from a PR branch against a backend still on the default branch looks fine and
 # behaves wrongly. So every place that prints a URL prints its repo + branch, and
-# a split between the two is called out rather than left for the user to notice.
+# a split between the two is classified rather than left for the user to notice.
 cmd_urls() {
-  local fe be
+  local fe be feb beb fen ben
   fe=$(_repo_state "$FRONTEND_REPO_DIR"); be=$(_repo_state "$BACKEND_REPO_DIR")
+  feb="${fe%% *}"; beb="${be%% *}"
+  fen=$(basename "$FRONTEND_REPO_DIR"); ben=$(basename "$BACKEND_REPO_DIR")
   echo "=== Preview URLs (persistent Cloudflare tunnel) ==="
   echo "  Frontend : $FRONTEND_URL   (static release, local :$FRONTEND_PORT)"
-  echo "             ↳ $(basename "$FRONTEND_REPO_DIR") @ $fe"
+  echo "             ↳ $fen @ $fe"
   echo "  API      : $API_URL   (local :$BACKEND_PORT, + /docs for Swagger)"
-  echo "             ↳ $(basename "$BACKEND_REPO_DIR") @ $be"
-  [ "${fe%% *}" = "${be%% *}" ] \
-    || echo "  ⚠️ MIXED CHECKOUT: frontend and backend are on different branches"
+  echo "             ↳ $ben @ $be"
+  case "$(_split_kind "$feb" "$beb")" in
+    split)
+      if [ "$feb" != "$(_default_branch "$FRONTEND_REPO_DIR")" ]; then
+        echo "  ℹ️ one-sided change: $ben has no '$feb', so it serves $beb — expected"
+      else
+        echo "  ℹ️ one-sided change: $fen has no '$beb', so it serves $feb — expected"
+      fi ;;
+    mixed)
+      echo "  ⚠️ MIXED CHECKOUT: $fen serves $feb but $ben serves $beb — not a one-sided change, so one of them is stale" ;;
+  esac
 }
 
 # Machine-readable "<repo-dir-name>\t<branch>\t<sha>" per served repo, for callers

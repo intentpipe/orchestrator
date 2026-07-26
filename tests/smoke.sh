@@ -148,11 +148,21 @@ opts = {"name": "proj", "workspace": ws, "default": "dev", "options": [
     {"label": "feat/x", "branches": {"app_mobile": "feat/x", "core": "dev"},
      "prs": [{"repo": "app_mobile", "number": 7, "title": "Add X", "url": "u"}]},
 ]}
+# checkout.py renders each option's body (including the "untouched by this change"
+# annotation); the daemon only routes it. Use the real renderer so the two can't drift.
+sys.path.insert(0, os.path.join(orch, "system-scripts"))
+import checkout as _co
+for _o in opts["options"]:
+    _o["body"] = _co.render_option(_o, "dev")
 daemon.checkout_options = lambda w: opts
 api = FakeAPI(); before = ls()
 assert daemon.process_message(mk(text="checkout", mid=30), cfg, reg, api) == "checkout offered for proj (2 option(s))"
 assert len(api.sent) == 3 and all(s[0] == 5 for s in api.sent), api.sent  # intro + 2 options, all in-topic
 assert "feat/x" in api.sent[-1][1] and "app_mobile: feat/x" in api.sent[-1][1] and "PR #7" in api.sent[-1][1]
+# the repo with no PR on that branch is annotated, so a one-sided option reads as
+# deliberate ("core stays on dev because nothing here changed") rather than broken
+assert "core: dev   (no PR on this branch — untouched by this change)" in api.sent[-1][1], api.sent[-1][1]
+assert "(no PR on this branch" not in api.sent[-2][1], "the baseline option is not a one-sided change"
 assert api.reactions == [(30, "👀"), (30, "👌")] and ls() == before, "checkout writes no note"
 offers = daemon.load_offers()
 assert len(offers) == 2 and all(o["topic"] == 5 for o in offers.values()), offers
@@ -220,7 +230,7 @@ orch, tmp = sys.argv[1], sys.argv[2]
 home = os.path.join(tmp, "orch"); os.makedirs(home)
 a = os.path.join(tmp, "a", "scaffold"); os.makedirs(a)
 b = os.path.join(tmp, "b", "scaffold"); os.makedirs(b)
-open(os.path.join(a, "agents.env"), "w").write('REPOS="be fe"\nREPO_be=../be\nREPO_fe=../fe\n')
+open(os.path.join(a, "agents.env"), "w").write('DEFAULT_BRANCH=dev\nREPOS="be fe"\nREPO_be=../be\nREPO_fe=../fe\n')
 open(os.path.join(b, "agents.env"), "w").write('REPOS="be"\nREPO_be=../be\n')
 json.dump({"1": {"name": "alpha", "workspace": a}, "2": {"name": "beta", "workspace": b}},
           open(os.path.join(home, "registry.json"), "w"))
@@ -250,12 +260,30 @@ spec = {"frontend": {"port": 3030, "url": "https://fe.example", "repo": "fe"}}
 out = status._svc(spec, "frontend", {"fe": "feat/x (abc1234)"})
 assert "https://fe.example" in out[0] and out[1].strip() == "↳ fe @ feat/x (abc1234)", out
 
-# a repo split across branches is the served-mismatch bug — it must be shouted,
-# not left for the reader to spot in two branch names
-status._branch = lambda repo: "feat/x (abc1234)" if repo.endswith("fe") else "dev (9f8e7d6)"
-assert "MIXED CHECKOUT" in status.build_report(a), status.build_report(a)
-status._branch = lambda repo: "dev (9f8e7d6)"
-assert "MIXED CHECKOUT" not in status.build_report(a)
+# Repos on different branches: only SOME splits are the served-mismatch bug.
+# Real repos here, because the distinction is "does the other repo have this
+# branch at all" — the frontend-only / backend-only case must NOT be shouted at.
+import subprocess
+def git(d, *args):
+    subprocess.run(["git", "-C", d, "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                   check=True, capture_output=True)
+for r in ("be", "fe"):
+    p = os.path.join(tmp, "a", r); os.makedirs(p)
+    subprocess.run(["git", "init", "-qb", "dev", p], check=True, capture_output=True)
+    git(p, "commit", "-qm", "init", "--allow-empty")
+rep = status.build_report(a)
+assert "MIXED CHECKOUT" not in rep and "one-sided" not in rep, rep   # both on dev
+
+# one-sided change: fe on a feature branch, be has no such branch → expected
+git(os.path.join(tmp, "a", "fe"), "checkout", "-qb", "feat/x")
+rep = status.build_report(a)
+assert "MIXED CHECKOUT" not in rep, rep
+assert "one-sided change: fe on 'feat/x'" in rep and "be has no such branch" in rep, rep
+
+# the real defect: be HAS feat/x but is serving dev → the preview is a mixture
+git(os.path.join(tmp, "a", "be"), "branch", "feat/x")
+rep = status.build_report(a)
+assert "MIXED CHECKOUT: be has 'feat/x' but serves dev" in rep, rep
 PY
 echo "[smoke] status.py ok"
 
@@ -326,7 +354,7 @@ for r in fe be; do
   git -C "$PREV/$r" -c user.email=t@t -c user.name=t commit -qm init --allow-empty
 done
 prev() { # prev <cmd...> — source the lib against the fake project, stub docker
-  ( export PROJECT=p FRONTEND_DIR="$PREV/fe" BACKEND_DIR="$PREV/be" \
+  ( export PROJECT=p FRONTEND_DIR="$PREV/fe" BACKEND_DIR="$PREV/be" DEFAULT_BRANCH=dev \
            FRONTEND_PORT=1 BACKEND_PORT=2 FRONTEND_URL=https://fe API_URL=https://api \
            STATE_DIR="$PREV/state" FLUTTER_PATH=/nonexistent
     source "$ORCH/preview/preview-lib.sh"
@@ -337,8 +365,29 @@ out="$(prev cmd_urls)"
 grep -q "↳ fe @ dev (" <<<"$out" || fail "cmd_urls must name the frontend repo + branch: $out"
 grep -q "↳ be @ dev (" <<<"$out" || fail "cmd_urls must name the backend repo + branch: $out"
 grep -q "MIXED CHECKOUT" <<<"$out" && fail "same branch in both repos is not a mixed checkout" || true
+# A one-sided change (the backend has no such branch) is the NORMAL case for a
+# frontend-only PR and must be reported as expected, not warned about — crying
+# wolf here would train the warning to be ignored where it matters.
 git -C "$PREV/fe" checkout -qb feat/x
-grep -q "MIXED CHECKOUT" <<<"$(prev cmd_urls)" || fail "a frontend/backend branch split must be shouted"
+out="$(prev cmd_urls)"
+grep -q "MIXED CHECKOUT" <<<"$out" && fail "a one-sided change must not be flagged as mixed: $out" || true
+grep -q "one-sided change: be has no 'feat/x'" <<<"$out" || fail "a one-sided change must be named as such: $out"
+# ...but once the branch EXISTS in the backend, serving dev there is the defect.
+git -C "$PREV/be" branch feat/x
+grep -q "MIXED CHECKOUT" <<<"$(prev cmd_urls)" || fail "a stale repo with the branch available must be shouted"
+git -C "$PREV/be" branch -qD feat/x
+# two unrelated feature branches: not something the checkout flow produces
+git -C "$PREV/be" checkout -qb feat/y
+grep -q "MIXED CHECKOUT" <<<"$(prev cmd_urls)" || fail "unrelated branches in both repos must be shouted"
+git -C "$PREV/be" checkout -q dev && git -C "$PREV/be" branch -qD feat/y
+# checkout falls the OTHER repo back to the default branch instead of leaving it
+# on the previous feature branch — "stay put" was how a two-repo feature bled into
+# the next, one-sided checkout.
+git -C "$PREV/be" checkout -qb feat/old
+out="$(prev _checkout_repo backend "$PREV/be" feat/x)"
+grep -q "falling back to dev" <<<"$out" || fail "a missing branch must fall back to the default: $out"
+[ "$(git -C "$PREV/be" branch --show-current)" = "dev" ] || fail "fallback did not check out the default branch"
+git -C "$PREV/be" branch -qD feat/old
 echo dirt > "$PREV/fe/dirt.txt"
 grep -q "dirty" <<<"$(prev cmd_urls)" || fail "a dirty tree must be marked"
 # plain start: no volume reset, no force-recreate (a relaunch must not drop the dev DB)

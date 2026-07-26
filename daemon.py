@@ -368,10 +368,9 @@ def offer_checkout(entry, cfg, api, thread_id, react, fail):
                      f"out, build it, and get the frontend URL:", thread_id)
     offers = load_offers()
     for opt in options:
-        body = f"[{opt['label']}]\n" + "\n".join(f"• {r}: {br}" for r, br in opt["branches"].items())
-        for pr in opt["prs"]:
-            body += f"\n    ↳ {pr['repo']} PR #{pr['number']}: {pr['title']}"
-        resp = api.send_message(cfg["chat_id"], body, thread_id)
+        # checkout.py renders the body (it knows which repos a one-sided change
+        # leaves on the default branch); the daemon only routes it.
+        resp = api.send_message(cfg["chat_id"], f"[{opt['label']}]\n{opt['body']}", thread_id)
         mid = (resp or {}).get("result", {}).get("message_id")
         if mid is not None:
             offers[str(mid)] = {"name": data["name"], "workspace": entry["workspace"],

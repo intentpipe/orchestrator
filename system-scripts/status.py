@@ -8,8 +8,10 @@ code). Joins two sources:
                                     (the daemon's topic→workspace map, reused)
   system-scripts/ports.json         per-project FE/BE host ports to probe
 
-For each project it reports, per code repo, the current git branch (+ `*` if the
-working tree is dirty), and whether the backend/frontend ports are listening.
+For each project it reports each served service — port state, its public preview
+URL, and the repo + branch + sha behind that URL (+ `*` if the working tree is
+dirty) — plus a MIXED CHECKOUT warning when the repos disagree on a branch, which
+is what "the frontend is showing the PR but the backend isn't" looks like from here.
 Pure stdlib, no deps — matches daemon.py so the daemon can shell out to it the
 same way it does transcribe.sh.
 
@@ -80,11 +82,14 @@ def _git(repo, *args):
 
 
 def _branch(repo):
+    """"<branch>[*] (<sha>)" — `*` = dirty tree. The sha matters as much as the
+    name: a branch that moved (a PR updated with new commits) is the same name
+    with a different tip, and a preview built before that push is stale."""
     if not os.path.isdir(os.path.join(repo, ".git")):
         return "no-git"
     br = _git(repo, "rev-parse", "--abbrev-ref", "HEAD") or "?"
     dirty = _git(repo, "status", "--porcelain")
-    return f"{br}{'*' if dirty else ''}"
+    return f"{br}{'*' if dirty else ''} ({_git(repo, 'log', '-1', '--format=%h') or '?'})"
 
 
 def _probe(port, path="/"):
@@ -112,17 +117,25 @@ def _probe(port, path="/"):
 _ICON = {"up": "🟢", "erroring": "🟠", "down": "🔴"}
 
 
-def _svc(ports, key):
-    """One service line. `ports[key]` is either a bare port int or
-    {"port": int, "health": "/path"}."""
+def _svc(ports, key, branches):
+    """Lines for one service. `ports[key]` is a bare port int, or
+    {"port", "health", "url", "repo"} — with `url`/`repo` the report names the
+    public URL and, under it, the repo + branch + sha it is currently serving.
+    That pairing is the point: a preview URL is stable, so the only thing that
+    tells you WHAT it is serving is the branch behind it."""
     spec = ports.get(key)
     port = spec.get("port") if isinstance(spec, dict) else spec
     if not port:
-        return f"{key}: n/a"
+        return [f"   {key + ':':<9} n/a"]
     path = spec.get("health", "/") if isinstance(spec, dict) else "/"
     state, code = _probe(port, path)
     tail = f":{port} ({code})" if state == "erroring" and code else f":{port}"
-    return f"{key}: {_ICON[state]} {tail}"
+    url = spec.get("url") if isinstance(spec, dict) else None
+    lines = [f"   {key + ':':<9} {_ICON[state]} {tail}" + (f"  {url}" if url else "")]
+    repo = spec.get("repo") if isinstance(spec, dict) else None
+    if repo:
+        lines.append(f"      ↳ {repo} @ {branches.get(repo, '(not in agents.env)')}")
+    return lines
 
 
 def build_report(only_workspace=None):
@@ -141,12 +154,22 @@ def build_report(only_workspace=None):
         lines.append(f"• {p['name']}")
         ws = p["workspace"]
         repos = _parse_agents_env(os.path.join(ws, "agents.env"))
-        if repos:
-            lines.append("   branches: " + ", ".join(f"{n} {_branch(path)}" for n, path in repos))
-        else:
-            lines.append(f"   branches: (no agents.env at {ws})")
+        branches = {n: _branch(path) for n, path in repos}
         ports = ports_map.get(p["name"], {})
-        lines.append("   running:  " + " · ".join([_svc(ports, "backend"), _svc(ports, "frontend")]))
+        for key in ("frontend", "backend"):
+            lines += _svc(ports, key, branches)
+        # Repos not bound to a served port still belong in the report — they are
+        # part of the checkout state even when nothing serves them directly.
+        rest = [n for n in branches
+                if n not in {s.get("repo") for s in ports.values() if isinstance(s, dict)}]
+        if rest:
+            lines.append("   other repos: " + ", ".join(f"{n} @ {branches[n]}" for n in rest))
+        elif not repos:
+            lines.append(f"   repos: (no agents.env at {ws})")
+        # One branch across every repo is the coherent case; a split means the
+        # frontend and backend URLs are showing different code.
+        if len({b.split()[0].rstrip("*") for b in branches.values()}) > 1:
+            lines.append("   ⚠️ MIXED CHECKOUT: repos are on different branches")
     return "\n".join(lines)
 
 

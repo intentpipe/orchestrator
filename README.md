@@ -56,14 +56,22 @@ per served service: whether its port is listening, its **public preview URL**, a
       ↳ app_mobile @ feature/tyf-179-visit-notifications (8fc5dac)
    backend:  🟢 :8800  https://tyf-api.squadrafrizzante.com
       ↳ core @ dev (0947218)
-   ⚠️ MIXED CHECKOUT: repos are on different branches
+   ⚠️ MIXED CHECKOUT: core has 'feature/tyf-179-visit-notifications' but serves dev — the preview is a mixture
 ```
 
 A preview URL is stable, so the branch behind it is the only thing that says *what* it
-is serving — and when the repos disagree (the frontend showing a PR that its backend
-doesn't) the report says so outright instead of leaving it to be spotted. Which repo
-backs which URL is declared per service in `ports.json` (`url` + `repo`); repos that
-back no service are still listed under `other repos`.
+is serving. Which repo backs which URL is declared per service in `ports.json`
+(`url` + `repo`); repos that back no service are still listed under `other repos`.
+
+**Not every branch split is wrong**, and the report distinguishes them — a warning that
+fires on the normal case is a warning you learn to ignore:
+
+| Repos | Verdict |
+|---|---|
+| Same branch everywhere | nothing said |
+| One repo on a feature branch, the others on the default branch **and they have no such branch** | `ℹ️ one-sided change … — expected` — a frontend-only (or backend-only) PR has nothing to check out on the other side |
+| A repo **has** the feature branch but is serving the default branch | `⚠️ MIXED CHECKOUT` — this is the real defect |
+| Repos on unrelated non-default branches | `⚠️ MIXED CHECKOUT` — the checkout flow never produces that, so a tree is stale |
 
 It short-circuits before topic routing, so it never writes an update note. Implementation lives in
 `system-scripts/status.py` (pure stdlib; also runnable from the shell to print the same report) and
@@ -134,14 +142,21 @@ checkout options — one Telegram message each:
 repo, then runs `relaunch --reset`, which rebuilds the preview stack and posts the
 fresh **URLs together with the branch behind each** back into the topic.
 
-Three rules make what you then look at trustworthy — each of them fixes a way the
+Four rules make what you then look at trustworthy — each of them fixes a way the
 preview used to lie about itself:
 
 - **All repos or none.** Every repo is checked first; if any one can't be switched
-  (a genuinely dirty tree, a missing branch) *nothing* is checked out and nothing
-  is rebuilt — you get a message saying which repo and why. A frontend on the PR
-  branch talking to the previous branch's backend looks fine and behaves wrongly,
-  so the old state is the safer answer.
+  (a genuinely dirty tree) *nothing* is checked out and nothing is rebuilt — you get
+  a message saying which repo and why. A frontend on the PR branch talking to the
+  previous branch's backend looks fine and behaves wrongly, so the old state is the
+  safer answer.
+- **A repo the change doesn't touch goes to the default branch — not "wherever it
+  was".** Most changes are one-sided, so a frontend-only PR *must* leave the backend
+  on `dev`: that is a complete state, not a mixture, and the option message says so
+  (`core: dev   (no PR on this branch — untouched by this change)`). What it must not
+  do is leave that repo standing on the *previous* checkout's feature branch, which is
+  what "no such branch here, staying put" used to do — one two-repo feature bleeding
+  into the next, one-sided one.
 - **Lockfile churn is not an edit.** Building a preview rewrites `pubspec.lock` /
   `uv.lock`; those are restored from the commit before the dirty check, so routine
   build drift can't get a repo skipped. Any other dirt is a real edit and is never

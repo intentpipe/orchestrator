@@ -118,12 +118,26 @@ def options_for(workspace):
             else:
                 branch_map[rname] = default  # no PR here → stay on default (the FE/BE-only rule)
         options.append({"label": b, "branches": branch_map, "prs": prs})
+    # Each option carries its own rendered body, so the CLI and the daemon post
+    # the SAME text — the daemon used to rebuild it from the branch map and drifted
+    # from this one the moment either grew an annotation.
+    for opt in options:
+        opt["body"] = render_option(opt, default)
     return {"name": name, "workspace": workspace, "default": default, "options": options}
 
 
-def render_option(opt):
-    """One option as a Telegram message body (repo→branch, with PR annotations)."""
-    lines = [f"• {r}: {br}" for r, br in opt["branches"].items()]
+def render_option(opt, default):
+    """One option as a message body (repo→branch, with PR annotations).
+
+    A repo left on the default branch inside a *feature* option is annotated as
+    such: that is the one-sided-change case (a frontend-only PR has no backend
+    branch to check out), and saying so up front is what separates "this option is
+    incomplete" from "this option is correct and only touches one repo"."""
+    lines = []
+    for r, br in opt["branches"].items():
+        one_sided = br == default and opt["label"] != f"{default} (baseline)"
+        lines.append(f"• {r}: {br}" + ("   (no PR on this branch — untouched by this change)"
+                                       if one_sided else ""))
     for pr in opt["prs"]:
         lines.append(f"    ↳ {pr['repo']} PR #{pr['number']}: {pr['title']}")
     return "\n".join(lines)
@@ -137,7 +151,7 @@ def render(workspace):
     out = [f"🔀 checkout · {data['name']}", ""]
     for i, opt in enumerate(data["options"]):
         out.append(f"[{i}] {opt['label']}")
-        out.append(render_option(opt))
+        out.append(opt["body"])
         out.append("")
     return "\n".join(out).rstrip()
 

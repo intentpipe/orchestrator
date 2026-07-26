@@ -10,8 +10,10 @@ code). Joins two sources:
 
 For each project it reports each served service — port state, its public preview
 URL, and the repo + branch + sha behind that URL (+ `*` if the working tree is
-dirty) — plus a MIXED CHECKOUT warning when the repos disagree on a branch, which
-is what "the frontend is showing the PR but the backend isn't" looks like from here.
+dirty). When the repos are on different branches it says which kind of split that
+is: expected (a one-sided change — the other repo simply has no such branch) or a
+MIXED CHECKOUT, where a repo has the feature branch but isn't on it — what "the
+frontend is showing the PR but the backend isn't" looks like from here.
 Pure stdlib, no deps — matches daemon.py so the daemon can shell out to it the
 same way it does transcribe.sh.
 
@@ -138,6 +140,48 @@ def _svc(ports, key, branches):
     return lines
 
 
+def _default_branch(workspace):
+    """DEFAULT_BRANCH from the workspace's agents.env; `main` when unset. The
+    branch a repo sits on when a change doesn't touch it."""
+    try:
+        with open(os.path.join(workspace, "agents.env")) as f:
+            for line in f:
+                if line.strip().startswith("DEFAULT_BRANCH="):
+                    return line.strip().split("=", 1)[1].strip().strip('"').strip("'") or "main"
+    except OSError:
+        pass
+    return "main"
+
+
+def _split_note(repo_paths, branches, default):
+    """The one line to say about repos being on different branches — or None.
+
+    Not every split is wrong. Most changes touch one repo only, so a
+    frontend-only PR *correctly* leaves the backend on the default branch;
+    flagging that would cry wolf on the common case. What is wrong is a repo
+    sitting on the default branch when the feature branch exists for it too —
+    that is the frontend-showing-the-PR-but-not-the-backend defect.
+    """
+    names = {n: b.split()[0].rstrip("*") for n, b in branches.items()}
+    if len(set(names.values())) <= 1:
+        return None
+    feature = {n: b for n, b in names.items() if b != default}
+    baseline = [n for n, b in names.items() if b == default]
+    if len(set(feature.values())) > 1:
+        return ("⚠️ MIXED CHECKOUT: " + ", ".join(f"{n} on {b}" for n, b in sorted(names.items()))
+                + " — unrelated branches, so at least one is stale")
+    branch = next(iter(feature.values()))
+    # A repo on the default branch that HAS the feature branch should be on it.
+    stale = [n for n in baseline
+             if _git(repo_paths[n], "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}") is not None
+             or _git(repo_paths[n], "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}") is not None]
+    if stale:
+        return (f"⚠️ MIXED CHECKOUT: {', '.join(stale)} has '{branch}' but serves {default} "
+                "— the preview is a mixture")
+    return (f"ℹ️ one-sided change: {', '.join(sorted(feature))} on '{branch}'; "
+            f"{', '.join(sorted(baseline))} has no such branch and serves {default} — expected")
+
+
 def build_report(only_workspace=None):
     """Report on every registered project, or just the one at `only_workspace`."""
     projects = _projects()
@@ -166,10 +210,9 @@ def build_report(only_workspace=None):
             lines.append("   other repos: " + ", ".join(f"{n} @ {branches[n]}" for n in rest))
         elif not repos:
             lines.append(f"   repos: (no agents.env at {ws})")
-        # One branch across every repo is the coherent case; a split means the
-        # frontend and backend URLs are showing different code.
-        if len({b.split()[0].rstrip("*") for b in branches.values()}) > 1:
-            lines.append("   ⚠️ MIXED CHECKOUT: repos are on different branches")
+        note = _split_note(dict(repos), branches, _default_branch(ws))
+        if note:
+            lines.append("   " + note)
     return "\n".join(lines)
 
 

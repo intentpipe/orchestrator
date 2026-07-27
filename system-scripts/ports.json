@@ -5,7 +5,7 @@
     "frontend": { "port": 3031, "health": "/", "url": "https://bibbles.squadrafrizzante.com", "repo": "frontend" }
   },
   "tell-your-friends": {
-    "backend": { "port": 8800, "health": "/health", "url": "https://tyf-api.squadrafrizzante.com", "repo": "core" },
+    "backend": { "port": 8800, "health": "/readyz", "url": "https://tyf-api.squadrafrizzante.com", "repo": "core" },
     "frontend": { "port": 3030, "health": "/", "url": "https://tyf.squadrafrizzante.com", "repo": "app_mobile" }
   }
 }

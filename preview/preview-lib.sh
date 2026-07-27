@@ -115,6 +115,21 @@ start_backend() {
   (cd "$BACKEND_DIR" && DC up -d --build "${extra[@]}")
 }
 
+# `flutter pub get` ends every run with a ~100-line "_fe_analyzer_shared 93.0.0
+# (105.0.0 available) … 97 packages have newer versions incompatible with
+# dependency constraints" listing. Dependency drift is never actionable from a
+# preview build, and repeating that block on every build crowded real failures
+# out of the fixed-size log tails the completion messages read. So keep the
+# output in a file and only print it when pub get actually fails.
+pub_get_quiet() {
+  local log="$STATE_DIR/pub-get.log"
+  if flutter pub get > "$log" 2>&1; then
+    echo "[frontend] flutter pub get ok (output in $log)"
+  else
+    echo "[frontend] flutter pub get FAILED:"; cat "$log"; return 1
+  fi
+}
+
 build_frontend() {
   declare -F pre_build >/dev/null && pre_build
   # Regenerate code-gen outputs (freezed / json_serializable) before building.
@@ -125,7 +140,7 @@ build_frontend() {
   # so mirror it here — previews must build the exact code the loop verified.
   if grep -qE '^[[:space:]]*build_runner:' "$FRONTEND_DIR/pubspec.yaml" 2>/dev/null; then
     echo "[frontend] dart run build_runner build --delete-conflicting-outputs"
-    (cd "$FRONTEND_DIR" && flutter pub get && dart run build_runner build --delete-conflicting-outputs)
+    (cd "$FRONTEND_DIR" && pub_get_quiet && dart run build_runner build --delete-conflicting-outputs)
   fi
   echo "[frontend] flutter build web --release --pwa-strategy=none ${BUILD_EXTRA[*]}"
   # --pwa-strategy=none: don't generate/register the Flutter service worker, so

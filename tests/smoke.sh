@@ -128,11 +128,30 @@ assert api.reactions == [(18, "👀"), (18, "👌")] and ls() == before, "pull-a
 # case/space-insensitive, and fine from a topic with no workspace (fleet-wide)
 assert daemon.process_message(mk(text=" PULL ALL ", message_thread_id=77, mid=19), cfg, reg, api) == "pull-all done"
 
+# `plugin` (and 🔌): box-level like pull-all — never topic-scoped (one user-scope
+# install serves every project), writes no note, and passes the daemon's own plugin
+# dir through so the keyword and sync_plugin can't resolve different sources.
+gcalls = []
+daemon.plugin_report = lambda plugin_dir=None: gcalls.append(plugin_dir) or "🔌 machines-at-work plugin\n(stub)"
+api = FakeAPI(); before = ls()
+assert daemon.process_message(mk(text="plugin", mid=25), cfg, reg, api) == "plugin report sent"
+assert gcalls[-1] == "/opt/maw", gcalls  # maw_scripts /opt/maw/scripts → the plugin root
+assert api.sent[-1] == (5, "🔌 machines-at-work plugin\n(stub)")
+assert api.reactions == [(25, "👀"), (25, "👌")] and ls() == before, "plugin must not write a note"
+# the 🔌 alias, and from a topic with no workspace (it is never project-scoped)
+assert daemon.process_message(mk(text="🔌", message_thread_id=77, mid=26), cfg, reg, api) == "plugin report sent"
+assert daemon.process_message(mk(text=" PLUGIN ", mid=27), cfg, reg, api) == "plugin report sent"
+# a sentence containing the word is still a note, not a command
+n = len(gcalls)
+assert daemon.process_message(mk(text="the plugin broke again", date=1700000004, mid=28), cfg, reg, api).startswith("queued text")
+assert len(gcalls) == n and "1700000004-28.md" in ls()
+
 # `help`: lists every command. Short-circuits like status/pull-all — replies into
 # its topic, writes no note, works in a project topic and in General alike.
 api = FakeAPI(); before = ls()
 assert daemon.process_message(mk(text="help", mid=22), cfg, reg, api) == "help sent"
 assert api.sent[-1][0] == 5 and "status" in api.sent[-1][1] and "pull-all" in api.sent[-1][1]
+assert "plugin" in api.sent[-1][1], "help must list every keyword the router accepts"
 assert "plan" in api.sent[-1][1] and "build-all" in api.sent[-1][1] and "unblock" in api.sent[-1][1], "help must list the triggers"
 assert api.reactions == [(22, "👀"), (22, "👌")] and ls() == before, "help must not write a note"
 # case-insensitive, accepts /help, and works from a workspace-less topic

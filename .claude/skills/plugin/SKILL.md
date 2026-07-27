@@ -17,4 +17,6 @@ Script: `$(git rev-parse --show-toplevel)/system-scripts/plugin.py` — the mech
    - **source on a feature branch or dirty (`*`)** — not an error, but say which branch the installed version came from: a cache built from an unmerged branch is what every project is now running.
 4. If the source version and the cache already match, say so in one line and stop. There is nothing to do and no reason to reinstall.
 
+The same op is a Telegram keyword — `plugin` or 🔌, in any topic — running the same script. That surface always updates-then-reports; the modes above are what a terminal wants and a phone doesn't.
+
 Why this exists: the plugin's **skills** run from a version-pinned install cache, only its `scripts/` run live via `MAW_SCRIPTS`. A version bump that is never reinstalled leaves every project's headless plan/build/unblock executing a stale copy — the cache once sat at 0.19.0, predating the `unblock` skill entirely, so 🩹 invoked a skill that wasn't installed. `daemon.sync_plugin` closes that before a dispatch; this is the same operation on demand, plus the per-project answer to "what are we actually running".

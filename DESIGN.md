@@ -158,7 +158,14 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     a terminal inside this repo — the same moment `logmine`'s implement leg lands a plugin PR. `status`
     and `pull-all` answer questions you have *away* from the box; this one you have *at* it. So it ships
     as a repo skill (the first in this repo) and the script stays keyword-ready — a `plugin` keyword is
-    one `_route` short-circuit away if it turns out to be a thing you want from the phone. *Second
+    one `_route` short-circuit away if it turns out to be a thing you want from the phone. **It was, the
+    same day** (`plugin` / 🔌, alongside `status` and `pull-all`): the *away-from-the-box* case is exactly
+    a `logmine` proposal that merges a plugin PR while you're out — the cache is then stale and every
+    project's next 🧠/🚀/🩹 runs the old skills until something reinstalls it, and 🔌 is how you force
+    that from the phone instead of waiting for the next dispatch to do it silently. What the paragraph
+    above got right is that they are one op, so they stay one script (`plugin.py`): the keyword is a
+    `_route` short-circuit around `build_report()`, the skill adds the `--check`/`--pull` modes a terminal
+    wants and a phone doesn't. Both were worth having; only the ordering was wrong. *Second
     objection:* the per-project lines look redundant, since one user-scope install serves every project
     and they must all print the same number. They must all print the same number **only when every
     project enables the plugin** — a project whose `.claude/settings.json` lost the `enabledPlugins`

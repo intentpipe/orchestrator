@@ -21,6 +21,10 @@ project when sent in its topic, all projects when sent anywhere else. Keyword
 `pull-all` likewise short-circuits: system-scripts/pull.py fast-forward-pulls the
 whole fleet (every project's repos + the machines-at-work scaffold via
 MAW_SCRIPTS), skipping any dirty tree, and replies with a per-repo result.
+Keyword `plugin` (or 🔌) short-circuits too: system-scripts/plugin.py reinstalls
+the machines-at-work plugin when its source version moved — the same reinstall
+sync_plugin does silently before a dispatch — and replies with the source and
+cache versions plus what each project actually runs.
 Keyword `help` short-circuits the same way, replying with the full command list.
 
 Keyword `checkout` (in a project topic) posts that project's checkout options —
@@ -70,6 +74,7 @@ TRANSCRIBE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcrib
 STATUS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "status.py")
 PULL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "pull.py")
 CHECKOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "checkout.py")
+PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "plugin.py")
 RELAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relaunch")
 # message_id → offer map for `checkout`: reacting to an offer message triggers its
 # build. Persisted so an offer survives the restart between posting and reacting.
@@ -128,6 +133,8 @@ HELP = (
     "topic it scopes to that project; elsewhere it covers every project.\n"
     "• pull-all — fast-forward-pull every repo in the fleet (and the "
     "machines-at-work plugin); dirty trees are skipped, never clobbered.\n"
+    "• 🔌 or plugin — update the machines-at-work plugin install from source and "
+    "report the version each project runs (a stale cache means stale skills).\n"
     "• logmine — read the orchestrator's own logs since last time and post "
     "tooling-improvement proposals; react to one to implement it (branch + PR).\n"
     "• help — this message.\n"
@@ -321,6 +328,22 @@ def pull_report(maw_scripts=None):
     if out.returncode != 0:
         return f"⚠️ pull-all failed: {out.stderr.strip() or 'unknown error'}"
     return out.stdout.strip() or "(no repos)"
+
+
+def plugin_report(plugin_dir=None):
+    """Reinstall the machines-at-work plugin if its source moved, then report the
+    version every project runs; plugin.py's stdout is the Telegram reply. The
+    daemon posts it into the topic the keyword came from, so plugin.py is run
+    WITHOUT --post (which would also send it to the scaffold topic).
+
+    Same synchronous shape as status_report/pull_report — it parks the poll loop,
+    bounded by the timeout. sync_plugin does this reinstall silently before a
+    dispatch; the keyword is the on-demand version that also says what it found."""
+    cmd = [sys.executable, PLUGIN] + (["--source", plugin_dir] if plugin_dir else [])
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+    if out.returncode != 0:
+        return f"⚠️ plugin failed: {out.stderr.strip() or 'unknown error'}"
+    return out.stdout.strip() or "(no plugin report)"
 
 
 def load_offers():
@@ -820,6 +843,15 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
         api.send_message(cfg["chat_id"], pull_report(cfg.get("maw_scripts")), thread_id)
         react("👌")
         return "pull-all done"
+
+    # `plugin` (or 🔌): box-level like status/pull-all — the plugin install is
+    # user-scope, one copy serving every project, so this is never topic-scoped.
+    # It reinstalls a moved version and reports what each project actually runs;
+    # the reply goes to the topic it was asked from. Never writes a note.
+    if stripped in ("plugin", "🔌"):
+        api.send_message(cfg["chat_id"], plugin_report(_maw_plugin_dir(cfg)), thread_id)
+        react("👌")
+        return "plugin report sent"
 
     # `logmine`: box-level like status/pull-all — read the orchestrator's own logs
     # since the last run and post tooling-improvement proposals to react-to-implement.

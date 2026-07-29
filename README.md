@@ -184,6 +184,37 @@ daemon requests `message_reaction` in `getUpdates`' `allowed_updates` (both are
 already wired). A reaction by a non-allow-listed user, a cleared reaction, or a
 reaction on any non-offer message does nothing.
 
+### The same thing without picking: `checkout.py --refresh`
+
+`machines-at-work`'s `task.sh done` puts every repo back on the default branch, so
+the moment a task lands the preview goes back to serving the mainline — amend a PR
+and you get a rebuilt preview of `dev`. `--refresh` closes that loop:
+
+```
+system-scripts/checkout.py --refresh <workspace> [branch]
+```
+
+It checks out `branch` in every repo that **has** it (repos that don't stay on the
+default branch — the same one-sided FE/BE rule as an option, extended to branches
+with no PR yet, since a feature's PR opens only when its last task lands), then
+relaunches with `--reset` so the branch's migrations replay into a fresh dev
+database. With no branch it follows the **most recently updated open PR**.
+
+Wire it per project in the workspace's `agents.env` — the plugin runs it detached
+when a task lands, once per headless loop run:
+
+```sh
+AFTER_DONE='"$HOME/all-machines-at-work/server-orchestrator/system-scripts/checkout.py" --refresh "$MAW_WORKSPACE"'
+```
+
+Two rules keep it safe unattended. It **gives way to work in flight**: a repo on a
+branch this flow didn't park there is a builder mid-task, and the refresh skips
+rather than switching under it (a human-picked option still switches — that is what
+picking means). And it **serialises per project** on the same pidfile the Telegram
+checkout uses: a refresh arriving while one builds is queued, not stacked, and the
+queued round re-picks its target when it runs, so after a run of several tasks the
+last branch developed is the one served.
+
 ## Keyword: `relaunch`
 
 Send `relaunch` (text) in a **project topic** to rebuild that project's preview stack

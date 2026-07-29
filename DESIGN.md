@@ -174,6 +174,30 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     that with the fix line and never edits another project's settings — enumerating is the orchestrator's
     job (the dependency runs one way), repairing a project is not.
 
+14. **The preview follows the branch that was just developed — `checkout.py --refresh`, called by the
+    project, decided here (2026-07-29).** The `checkout` keyword answers "show me *this* PR"; nothing
+    answered "show me what you just built". `task.sh done` ends by putting every repo back on the default
+    branch (the plugin's own #17 — the next task must branch from a clean base), so the preview reverted
+    to the mainline the moment a task landed: amend a PR from the phone, get a rebuilt preview of `dev`,
+    and re-pick the branch by hand every time. `--refresh` is the existing check-out-then-relaunch with
+    the human's pick replaced by a rule: the branch the plugin names, else the most recently updated open
+    PR. *Objection:* the plugin knows which branch it just landed — why not have it do the checkout? Because
+    the dependency runs one way (#24 in the plugin's DESIGN, and #13 above): the plugin must not know this
+    box has previews, docker volumes, or a registry. So the plugin ships a generic seam — one declared
+    `AFTER_DONE` command per workspace, given the branch — and every preview-shaped decision stays here.
+    Three of them are what makes it safe to run unattended. **Branch existence, not an open PR, decides
+    which repos take part** — a feature's PR opens only when its last task lands (plugin #25/#30), so
+    between amendments the branch exists with no PR; repos without it stay on the default branch, the same
+    one-sided FE/BE rule an option already uses. **It gives way to work in flight**: a repo on a branch
+    this flow didn't park there is a builder mid-task, and switching under a running session strands its
+    work — so the refresh skips and says so, where a human-picked option still switches (picking *is* the
+    authority). Tracking "what we parked" (a small state file next to the pidfile) is what keeps that from
+    also blocking the preview from leaving its own previous branch. **It serialises on the checkout
+    pidfile** the daemon already uses, and a refresh that finds a build running queues a marker instead of
+    stacking a second docker+flutter build; the queued round re-picks its target when it runs, so a loop
+    that lands five tasks rebuilds once, for the last branch. The plugin defers to the end of a loop run
+    for the same reason from the other side.
+
 ## Phased build (each phase independently verifiable)
 - **Phase 1 — outbound leg (in-plugin, smallest, low-risk).** Extend `notify.sh`: creds set → `sendMessage`
   into `TELEGRAM_TOPIC_ID`. *Verify:* `notify.sh "hi"` from a project lands in its topic. Independently useful

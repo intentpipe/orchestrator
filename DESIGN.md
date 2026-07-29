@@ -147,6 +147,33 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     the moment an ask *can* be named as a fixed op with a parameter, it belongs in a deterministic command, not
     the interpretation path.
 
+13. **Plugin freshness gets a skill, not a keyword — because it is a maintainer op, not a fleet op
+    (2026-07-27).** `sync_plugin` already reinstalls a moved plugin version before a dispatch, but it is
+    silent and only fires when a trigger happens to arrive: nothing on the box answers "what version is
+    each project actually running right now". `/plugin` (`.claude/skills/plugin/`, mechanics in
+    `system-scripts/plugin.py`) is that answer, and reinstalls on the way. *Objection:* by #12's rule —
+    "the moment an ask can be named as a fixed op, it belongs in a deterministic command" — shouldn't this
+    be a Telegram keyword like `pull-all`? The op *is* deterministic (the script is), but its audience
+    isn't the phone: you reach for it while working **on the tooling**, right after bumping a version, in
+    a terminal inside this repo — the same moment `logmine`'s implement leg lands a plugin PR. `status`
+    and `pull-all` answer questions you have *away* from the box; this one you have *at* it. So it ships
+    as a repo skill (the first in this repo) and the script stays keyword-ready — a `plugin` keyword is
+    one `_route` short-circuit away if it turns out to be a thing you want from the phone. **It was, the
+    same day** (`plugin` / 🔌, alongside `status` and `pull-all`): the *away-from-the-box* case is exactly
+    a `logmine` proposal that merges a plugin PR while you're out — the cache is then stale and every
+    project's next 🧠/🚀/🩹 runs the old skills until something reinstalls it, and 🔌 is how you force
+    that from the phone instead of waiting for the next dispatch to do it silently. What the paragraph
+    above got right is that they are one op, so they stay one script (`plugin.py`): the keyword is a
+    `_route` short-circuit around `build_report()`, the skill adds the `--check`/`--pull` modes a terminal
+    wants and a phone doesn't. Both were worth having; only the ordering was wrong. *Second
+    objection:* the per-project lines look redundant, since one user-scope install serves every project
+    and they must all print the same number. They must all print the same number **only when every
+    project enables the plugin** — a project whose `.claude/settings.json` lost the `enabledPlugins`
+    entry runs no version at all, and its `/machines-at-work:*` skills and 🧠/🚀/🩹 triggers then fail
+    *silently*, which is exactly the class of quiet staleness this script exists to make loud. It reports
+    that with the fix line and never edits another project's settings — enumerating is the orchestrator's
+    job (the dependency runs one way), repairing a project is not.
+
 ## Phased build (each phase independently verifiable)
 - **Phase 1 — outbound leg (in-plugin, smallest, low-risk).** Extend `notify.sh`: creds set → `sendMessage`
   into `TELEGRAM_TOPIC_ID`. *Verify:* `notify.sh "hi"` from a project lands in its topic. Independently useful

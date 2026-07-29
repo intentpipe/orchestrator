@@ -202,6 +202,48 @@ Send `help` (or `/help`) in **any** topic and the daemon replies with the full
 command list — the keywords above, the topic triggers, and the General-topic
 behaviour. Short-circuits like `status`; never writes a note.
 
+## Keyword: `plugin` (🔌) · skill: `/plugin`
+
+Update the `machines-at-work` plugin install from its source tree and report the
+version every project is running — the same op on two surfaces: send `plugin` or
+🔌 in **any** topic, or run `/plugin` from a Claude Code session **inside this
+repo** (`.claude/skills/plugin/`).
+
+```
+🔌 machines-at-work plugin
+
+source  0.26.0  (main 3e33829)
+cache   0.24.0 → 0.26.0 ✅ reinstalled
+
+• bibbles            0.26.0 ✅
+• tell-your-friends  0.26.0 ✅
+```
+
+The keyword always updates-then-reports and replies into the topic you asked
+from; like `status` and `pull-all` it short-circuits routing, is never
+topic-scoped (one user-scope install serves every project), and writes no note.
+The skill takes modes: `/plugin` updates then posts, `/plugin check` reports
+without changing anything, `/plugin pull` fast-forwards the source repo first
+(dirty tree → skipped, per `pull-all`'s rule). Run from a shell, the script's
+`--post` sends to the **scaffold** topic — the maintainer inbox — since a report
+about the fleet's tooling belongs to no single project.
+
+**One user-scope install serves every project**, so "the version this project is on"
+is the cache version. What genuinely varies per project is whether it *enables* the
+plugin (`<root>/.claude/settings.json` → `enabledPlugins`), which is why that is the
+per-project line: a project missing it runs no version at all — its
+`/machines-at-work:*` skills and its 🧠/🚀/🩹 triggers silently do nothing. The
+report names that with the one-line fix and never edits another project's settings.
+
+Mechanics: `system-scripts/plugin.py` (pure stdlib; reuses `status.py` for the
+fleet walk and `pull.py` for the never-clobber-a-dirty-tree rule) — one script
+behind both surfaces, so the keyword and the skill can never drift. It also runs
+from a shell — `plugin.py [--check] [--pull] [--post] [--source <dir>]` — and is
+the same reinstall `sync_plugin` performs before a dispatch (see **Plugin
+freshness** below), made on-demand and given a report. The daemon passes its own
+`--source` (from `MAW_SCRIPTS`) so the keyword and `sync_plugin` can't resolve
+different source trees.
+
 ## General topic: free-form → `claude -p`
 
 Registered topics map to a project; the **General** topic doesn't. A message there that isn't `status`
@@ -230,7 +272,8 @@ daemon's home. Reaction lifecycle is the same as everywhere: 👀 → 👌, or �
 ## `system-scripts/`
 
 Server-wide, cross-project tooling that isn't the Telegram bridge itself: the `status`
-collector, the `pull-all` fast-forward puller, and the `checkout` option enumerator/builder
+collector, the `pull-all` fast-forward puller, the `checkout` option enumerator/builder, and
+the `plugin` install updater/reporter
 (all reuse `status.py`'s registry + agents.env + git walk). Anything the daemon exposes as a
 keyword-driven "act on the whole box" belongs here.
 

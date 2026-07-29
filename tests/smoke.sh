@@ -110,6 +110,26 @@ assert daemon.process_message(mk(text="🩹", mid=120), cfg, reg, api).startswit
 assert spawns[-1][0] == ["claude", "-p", "/machines-at-work:unblock headless", *daemon.PLAN_CLAUDE_FLAGS] and spawns[-1][2] == "proj.unblock"
 assert api.sent[-1][1] == "🩹 unblocking…"
 assert daemon.process_message(mk(text="unblock", mid=121), cfg, reg, api).startswith("unblock started"), "word form triggers too"
+# 📋/retro: headless /machines-at-work:retro, own pidfile; the track must carry the
+# workspace and the PRE-EXISTING retro reports so reap_jobs can post only new ones
+tracked = []
+daemon.spawn_detached = lambda cmd, cwd, base, track=None: tracked.append((cmd, cwd, base, track)) or 4242
+os.makedirs(os.path.join(ws, "retro"), exist_ok=True)
+open(os.path.join(ws, "retro", "2026-07-01-old.md"), "w").write("# old\n")
+assert daemon.process_message(mk(text="retro", mid=130), cfg, reg, api).startswith("retro started for proj")
+cmd, cwd, base, track = tracked[-1]
+assert cmd == ["claude", "-p", "/machines-at-work:retro headless", *daemon.PLAN_CLAUDE_FLAGS] and base == "proj.retro"
+assert track["workspace"] == ws and track["retro_before"] == ["2026-07-01-old.md"], track
+assert daemon.process_message(mk(text="📋", mid=131), cfg, reg, api).startswith("retro started"), "emoji form"
+# memory: project resolves from cwd — a workspace registered as <root>/machines-at-work
+# must spawn at <root>, so headless runs share the interactive session's memory store
+mawws = os.path.join(tmp, "p2", "machines-at-work"); os.makedirs(mawws)
+reg["6"] = {"name": "proj2", "workspace": mawws}
+assert daemon.process_message(mk(text="🧠", message_thread_id=6, mid=132), cfg, reg, api).startswith("plan started for proj2")
+assert tracked[-1][1] == os.path.join(tmp, "p2"), "spawn cwd must be the project ROOT, not the workspace"
+assert daemon.process_message(mk(text="🧠", mid=133), cfg, reg, api).startswith("plan started for proj")
+assert tracked[-1][1] == ws, "a workspace that IS the project root spawns in place"
+daemon.spawn_detached = lambda cmd, cwd, base, track=None: spawns.append((cmd, cwd, base)) or 4242
 assert ls() == before, "triggers must not write inbox files"
 # a token inside a sentence is a note, not a trigger
 n = len(spawns)
@@ -260,6 +280,44 @@ assert any(t.startswith("😱 plan for failproj") and "boom" in t for t in texts
 assert any(t.startswith("😱 plan for blockedproj") and "blocked" in t for t in texts), texts  # exit 0 but rejected
 assert len(texts) == 3, texts  # the running job posted nothing
 daemon._JOBS[:] = []
+
+# a finished retro run posts each NEW report under <workspace>/retro/ as its own
+# react-to-apply offer — pre-existing reports (retro_before) stay silent
+daemon.RETRO_OFFERS_FILE = os.path.join(daemon.RUN_DIR, "retro_offers.json")
+open(os.path.join(ws, "retro", "2026-07-29-new-pattern.md"), "w").write(
+    "# Retro 2026-07-29 · a new pattern\n\nbody\n\n## Confidence\n\n**High.** seen thrice.\n")
+api = FakeAPI()
+daemon._JOBS[:] = [{"popen": FakePopen(0), "log": _job("retroproj", 0, "wrote 1 report")["log"],
+                    "name": "proj", "action": "retro", "topic": 5,
+                    "workspace": ws, "retro_before": ["2026-07-01-old.md"]}]
+daemon.reap_jobs(cfg, api)
+texts = [t for _, t in api.sent]
+assert any(t.startswith("✅ retro for proj finished") for t in texts), texts
+offer_msgs = [t for t in texts if t.startswith("📋 retro proposal")]
+assert len(offer_msgs) == 1, texts  # only the NEW report, not the old one
+assert "Retro 2026-07-29 · a new pattern" in offer_msgs[0] and "High." in offer_msgs[0], offer_msgs
+assert "React to this message" in offer_msgs[0]
+roffers = daemon.load_retro_offers()
+assert len(roffers) == 1 and list(roffers.values())[0]["file"].endswith("2026-07-29-new-pattern.md"), roffers
+
+# reacting to the offer applies it: a headless claude run IN THE PLUGIN REPO whose
+# prompt carries the implement instructions + the full proposal text
+plugdir = os.path.join(tmp, "maw"); os.makedirs(os.path.join(plugdir, "scripts"))
+rcfg = {**cfg, "maw_scripts": os.path.join(plugdir, "scripts")}
+rmid = int(next(iter(roffers)))
+daemon.save_offers({})   # FakeAPI mids restart at 1 — drop the stale checkout offers so the id can't collide
+applies = []
+daemon.spawn_detached = lambda cmd, cwd, base, track=None: applies.append((cmd, cwd, base, track)) or 777
+api = FakeAPI()
+assert daemon.process_reaction(mkr(mid=rmid), rcfg, api).startswith("retro apply started")
+cmd, cwd, base, track = applies[-1]
+assert cwd == plugdir and base.startswith("retro-apply."), (cwd, base)
+assert cmd[0] == "claude" and "--dangerously-skip-permissions" in cmd
+assert "=== PROPOSAL ===" in cmd[2] and "a new pattern" in cmd[2], "prompt must embed the proposal"
+assert "machines-at-work plugin repo" in cmd[2], "prompt must be the retro-implement instructions"
+assert track["report_tail"] is True, track  # the PR URL surfaces on completion
+assert any("applying" in t for _, t in api.sent), api.sent
+daemon.spawn_detached = lambda cmd, cwd, base, track=None: spawns.append((cmd, cwd, base)) or 4242
 PY
 echo "[smoke] daemon process_message ok"
 

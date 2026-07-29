@@ -127,6 +127,13 @@ When a 🧠/🚀/🩹 run finishes, the daemon posts the outcome back into the t
 Every message you send gets a reaction: 👀 processing, then 👌 queued/started, or 😱 plus a reply
 saying what went wrong. (Telegram bots can only react from a fixed emoji set — no ✅/⚠️.)
 
+Anything else in a project topic queues as an intent note for the next 🧠 — text as-is, voice
+transcribed (the transcript quoted back so a mis-hear is visible). **Images too**: a photo — or a
+screenshot sent "as file" for full quality — lands next to its caption note in the workspace inbox;
+at plan time the plugin files it as a permanent `machines-at-work/resources/` file and the planner
+reads the picture itself (a UI mockup, a bug screenshot, a sketch), turning it into implementation
+tasks that reference it (`Resources:`). Non-image documents are refused with a reply.
+
 ## Keyword: `checkout`
 
 Send `checkout` (text) in a **project topic** and the daemon posts that project's

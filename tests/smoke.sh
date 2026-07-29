@@ -128,11 +128,30 @@ assert api.reactions == [(18, "👀"), (18, "👌")] and ls() == before, "pull-a
 # case/space-insensitive, and fine from a topic with no workspace (fleet-wide)
 assert daemon.process_message(mk(text=" PULL ALL ", message_thread_id=77, mid=19), cfg, reg, api) == "pull-all done"
 
+# `plugin` (and 🔌): box-level like pull-all — never topic-scoped (one user-scope
+# install serves every project), writes no note, and passes the daemon's own plugin
+# dir through so the keyword and sync_plugin can't resolve different sources.
+gcalls = []
+daemon.plugin_report = lambda plugin_dir=None: gcalls.append(plugin_dir) or "🔌 machines-at-work plugin\n(stub)"
+api = FakeAPI(); before = ls()
+assert daemon.process_message(mk(text="plugin", mid=25), cfg, reg, api) == "plugin report sent"
+assert gcalls[-1] == "/opt/maw", gcalls  # maw_scripts /opt/maw/scripts → the plugin root
+assert api.sent[-1] == (5, "🔌 machines-at-work plugin\n(stub)")
+assert api.reactions == [(25, "👀"), (25, "👌")] and ls() == before, "plugin must not write a note"
+# the 🔌 alias, and from a topic with no workspace (it is never project-scoped)
+assert daemon.process_message(mk(text="🔌", message_thread_id=77, mid=26), cfg, reg, api) == "plugin report sent"
+assert daemon.process_message(mk(text=" PLUGIN ", mid=27), cfg, reg, api) == "plugin report sent"
+# a sentence containing the word is still a note, not a command
+n = len(gcalls)
+assert daemon.process_message(mk(text="the plugin broke again", date=1700000004, mid=28), cfg, reg, api).startswith("queued text")
+assert len(gcalls) == n and "1700000004-28.md" in ls()
+
 # `help`: lists every command. Short-circuits like status/pull-all — replies into
 # its topic, writes no note, works in a project topic and in General alike.
 api = FakeAPI(); before = ls()
 assert daemon.process_message(mk(text="help", mid=22), cfg, reg, api) == "help sent"
 assert api.sent[-1][0] == 5 and "status" in api.sent[-1][1] and "pull-all" in api.sent[-1][1]
+assert "plugin" in api.sent[-1][1], "help must list every keyword the router accepts"
 assert "plan" in api.sent[-1][1] and "build-all" in api.sent[-1][1] and "unblock" in api.sent[-1][1], "help must list the triggers"
 assert api.reactions == [(22, "👀"), (22, "👌")] and ls() == before, "help must not write a note"
 # case-insensitive, accepts /help, and works from a workspace-less topic
@@ -286,6 +305,89 @@ rep = status.build_report(a)
 assert "MIXED CHECKOUT: be has 'feat/x' but serves dev" in rep, rep
 PY
 echo "[smoke] status.py ok"
+
+# --- plugin.py: the install-freshness report behind /plugin. Everything is stubbed
+# (fake source tree, fake install record, fake registry) — no `claude plugin update`
+# runs, nothing on the real box is touched. What it guards: a stale cache is never
+# reported as current, --check never mutates, a failed reinstall is not dressed up as
+# a success, and a project that doesn't ENABLE the plugin is called out rather than
+# printed with everyone else's version.
+python3 - "$ORCH" "$TMP" <<'PY' || fail "plugin.py checks failed"
+import json, os, sys
+orch, tmp = sys.argv[1], sys.argv[2]
+home = os.path.join(tmp, "porch"); os.makedirs(home)
+# three projects: one enables the plugin, one turned it off, one never had the entry
+for name, settings in (("on", {"machines-at-work@machines-at-work": True}),
+                       ("off", {"machines-at-work@machines-at-work": False}),
+                       ("none", None)):
+    root = os.path.join(tmp, "p-" + name); os.makedirs(os.path.join(root, "machines-at-work"))
+    if settings is not None:
+        os.makedirs(os.path.join(root, ".claude"))
+        json.dump({"enabledPlugins": settings}, open(os.path.join(root, ".claude", "settings.json"), "w"))
+json.dump({str(i): {"name": n, "workspace": os.path.join(tmp, "p-" + n, "machines-at-work")}
+           for i, n in enumerate(("on", "off", "none"))},
+          open(os.path.join(home, "registry.json"), "w"))
+os.environ["ORCH_HOME"] = home
+sys.path.insert(0, os.path.join(orch, "system-scripts"))
+import plugin
+
+src = os.path.join(tmp, "psrc", ".claude-plugin"); os.makedirs(src)
+def set_source(v): json.dump({"version": v}, open(os.path.join(src, "plugin.json"), "w"))
+cache = os.path.join(tmp, "pcache"); os.makedirs(os.path.join(cache, ".claude-plugin"))
+def set_installed(v, path=cache):
+    json.dump({"plugins": {plugin.PLUGIN_ID: [{"scope": "user", "version": v, "installPath": path}]}},
+              open(plugin.INSTALLED, "w"))
+    json.dump({"version": v}, open(os.path.join(cache, ".claude-plugin", "plugin.json"), "w"))
+plugin.INSTALLED = os.path.join(tmp, "installed.json")
+plugin.MARKETPLACES = os.path.join(tmp, "marketplaces.json")
+json.dump({plugin.MARKETPLACE: {"installLocation": os.path.dirname(src)}}, open(plugin.MARKETPLACES, "w"))
+run = lambda **kw: plugin.build_report(**kw)
+
+# in sync → "current", and each project's line answers what IT runs
+set_source("1.2.0"); set_installed("1.2.0")
+rep = run(check=True)
+assert "cache   1.2.0 ✅ current" in rep, rep
+assert "• on    1.2.0 ✅" in rep, rep
+assert "⚠️ disabled" in rep and "off" in rep, rep
+assert "not enabled" in rep, rep   # the project with no entry runs NO version, not "1.2.0"
+
+# stale + --check: says so, names the source version, and changes NOTHING
+updates = []
+plugin._update_cache = lambda: updates.append(1)
+set_source("1.3.0")
+rep = run(check=True)
+assert "⚠️ STALE — source is 1.3.0" in rep, rep
+assert not updates, "--check must never reinstall"
+assert "1.2.0" in rep and "• on    1.2.0" in rep, "projects still run the installed version, not the source"
+
+# stale + update: the reinstall runs and the transition is reported
+def good(): set_installed("1.3.0"); updates.append("ran"); return None
+plugin._update_cache = good
+rep = run()
+assert "cache   1.2.0 → 1.3.0 ✅ reinstalled" in rep, rep
+assert "• on    1.3.0 ✅" in rep, rep
+
+# a reinstall that fails must NOT read as success — this is the whole point of the
+# report: a silently stale cache is what runs the wrong skills in every project
+set_source("1.4.0")
+plugin._update_cache = lambda: "npm ERR! marketplace not found"
+rep = run()
+assert "⚠️ still not current" in rep and "marketplace not found" in rep, rep
+assert "✅ reinstalled" not in rep, rep
+
+# the install record and the cache dir disagreeing = the pinned copy isn't what the
+# record claims; and a source with no readable manifest is "cannot tell", not "current"
+set_installed("1.4.0", path=os.path.join(tmp, "gone")); set_source("1.4.0")
+assert "⚠️ cache dir" in run(check=True), run(check=True)
+set_installed("1.4.0")
+rep = run(check=True, explicit_source="/nonexistent")
+assert "cannot tell" in rep and "✅ current" not in rep, rep
+
+# no source at all (no marketplace, no MAW_SCRIPTS) → one honest line, no crash
+json.dump({}, open(plugin.MARKETPLACES, "w")); os.environ.pop("MAW_SCRIPTS", None)
+assert "no plugin source found" in run(check=True)
+PY
+echo "[smoke] plugin.py ok"
 
 # --- checkout.py --build: the branch-switch path the Telegram checkout flow runs.
 # Guards the mixed-checkout bug: a repo that can't be switched must ABORT the

@@ -445,6 +445,97 @@ assert on("be") == "dev" and on("fe") == "dev", "an option that can't apply in f
 PY
 echo "[smoke] checkout.py build ok"
 
+# --- checkout.py --refresh: the automatic side of the same flow — a machines-at-work
+# task lands, `done` puts every repo back on the default branch, and this points the
+# preview back at the branch that was just developed. Guards the three things that
+# make it usable unattended: a branch only one repo has leaves the other on default
+# (the one-sided FE/BE rule, here for a branch with no PR yet), with no branch named
+# it follows the most recently updated open PR, and a second refresh while one is
+# building QUEUES instead of stacking a rebuild — the last branch developed wins.
+python3 - "$ORCH" "$TMP" <<'PY' || fail "checkout.py refresh checks failed"
+import json, os, subprocess, sys
+orch, tmp = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(orch, "system-scripts"))
+import checkout, status
+
+root = os.path.join(tmp, "rf"); ws = os.path.join(root, "machines-at-work"); os.makedirs(ws)
+# the registry is the source of the project's name and topic (as for the daemon):
+# `relaunch` is addressed by name, and the refresh reports into that topic
+status.REGISTRY = os.path.join(tmp, "rf-registry.json")
+json.dump({"5": {"name": "proj", "workspace": ws}}, open(status.REGISTRY, "w"))
+open(os.path.join(ws, "agents.env"), "w").write(
+    'PROJECT_NAME=proj\nDEFAULT_BRANCH=dev\nREPOS="fe be"\nREPO_fe=../fe\nREPO_be=../be\n')
+def git(d, *a): subprocess.run(["git", "-C", d, "-c", "user.email=t@t", "-c", "user.name=t", *a],
+                               check=True, capture_output=True)
+for r in ("fe", "be"):
+    p = os.path.join(root, r); os.makedirs(p)
+    subprocess.run(["git", "init", "-qb", "dev", p], check=True, capture_output=True)
+    git(p, "commit", "-qm", "init", "--allow-empty")
+git(os.path.join(root, "fe"), "branch", "feature/only-fe")   # frontend-only work, no PR yet
+on = lambda r: subprocess.run(["git", "-C", os.path.join(root, r), "rev-parse", "--abbrev-ref", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+
+checkout.RUN_DIR = os.path.join(tmp, "rfrun")
+checkout.RELAUNCH = os.path.join(tmp, "fake-relaunch")   # written by the build section above
+checkout._post = lambda offer, text: None
+prs = {"fe": [], "be": []}
+checkout._open_prs = lambda repo: prs["fe" if repo.endswith("fe") else "be"]
+
+# a branch only the frontend has: the backend stays on dev instead of failing
+checkout.refresh(ws, "feature/only-fe")
+assert on("fe") == "feature/only-fe" and on("be") == "dev", (on("fe"), on("be"))
+# ... and the project root is accepted as well as the workspace dir
+checkout.refresh(root, "dev")
+assert on("fe") == "dev", on("fe")
+
+# a repo on a THIRD branch is a builder mid-task: an unattended refresh gives way
+# rather than switching the tree under a running session (a human-picked option
+# still switches — that path is checkout.build above)
+checkout.refresh(ws, "feature/only-fe")            # park the preview on the branch again
+git(os.path.join(root, "be"), "checkout", "-qb", "task/0007-wip")
+checkout.refresh(ws, "dev")
+assert on("be") == "task/0007-wip" and on("fe") == "feature/only-fe", (on("be"), on("fe"))
+# ... but the branch the PREVIOUS refresh parked there is the preview's own state,
+# not someone's work — it must still be able to move off it
+git(os.path.join(root, "be"), "checkout", "-q", "dev")
+checkout.refresh(ws, "dev")
+assert on("fe") == "dev", on("fe")
+
+# no branch named → follow the most recently updated open PR (not merely the last
+# one gh happened to list)
+git(os.path.join(root, "be"), "branch", "feature/older")
+git(os.path.join(root, "be"), "branch", "feature/newer")
+prs["be"] = [{"number": 1, "title": "older", "url": "u1", "headRefName": "feature/older",
+              "updatedAt": "2026-07-01T00:00:00Z"},
+             {"number": 2, "title": "newer", "url": "u2", "headRefName": "feature/newer",
+              "updatedAt": "2026-07-20T00:00:00Z"}]
+checkout.refresh(ws)
+assert on("be") == "feature/newer" and on("fe") == "dev", (on("be"), on("fe"))
+
+# a refresh arriving while one is in flight queues rather than stacking a rebuild:
+# a loop lands several tasks in a row and only the last branch is worth building
+os.makedirs(checkout.RUN_DIR, exist_ok=True)
+open(os.path.join(checkout.RUN_DIR, "proj.checkout.pid"), "w").write(str(os.getpid()))
+built = []
+checkout.refresh_once = lambda w, b=None: built.append(b)
+checkout.refresh(ws, "feature/only-fe")
+assert not built, "a queued refresh must not build"
+assert open(os.path.join(checkout.RUN_DIR, "proj.refresh-pending")).read().strip() == "feature/only-fe"
+# the run that owns the slot drains the queue when it finishes, so the branch that
+# arrived meanwhile is the one served
+os.remove(os.path.join(checkout.RUN_DIR, "proj.checkout.pid"))
+real_once = checkout.refresh_once
+def once(w, b=None):
+    real_once(w, b)
+    if len(built) == 1:   # a second task lands while the first refresh builds
+        open(os.path.join(checkout.RUN_DIR, "proj.refresh-pending"), "w").write("feature/newer\n")
+checkout.refresh_once = once
+checkout.refresh(ws, "dev")
+assert built == ["dev", "feature/newer"], built
+assert not os.path.exists(os.path.join(checkout.RUN_DIR, "proj.checkout.pid")), "pidfile must be released"
+PY
+echo "[smoke] checkout.py refresh ok"
+
 # --- preview-lib: the two things a preview must never get wrong — what code it is
 # serving (cmd_urls names the repo + branch behind every URL, and shouts when the
 # two repos disagree) and how the backend comes up on a branch switch (volumes

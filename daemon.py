@@ -8,8 +8,9 @@ rationale: DESIGN.md (alongside this file).
 Long-poll getUpdates → enforce the allowlist (the only door, Decision #4) →
 resolve the message's forum topic to a workspace via the registry → then either
 dispatch a trigger token (Decision #10: 🧠/`plan` → headless /machines-at-work:plan,
-🚀/`build-all` → detached loop.sh, 🩹/`unblock` → headless /machines-at-work:unblock;
-exact match only) or transcribe voice / take
+🚀/`build-all` → detached loop.sh, 🩹/`unblock` → headless /machines-at-work:unblock,
+📋/`retro` → headless /machines-at-work:retro, whose new reports post back
+react-to-apply; exact match only) or transcribe voice / take
 text and drop the RAW message into <workspace>/updates/.inbox/<epoch>-<msgid>.md
 — machines-at-work's inbound.sh contract; the plugin names and formats notes,
 never the daemon. An image (photo, or an image/* document) is intent too: it is
@@ -93,6 +94,15 @@ LOGMINE_ANALYZE = os.path.join(ORCH_DIR, "logmine", "analyze.md")
 LOGMINE_IMPLEMENT = os.path.join(ORCH_DIR, "logmine", "implement.md")
 LOGMINE_OFFERS_FILE = os.path.join(RUN_DIR, "logmine_offers.json")
 
+# retro: a project-topic `retro` keyword runs the plugin's /machines-at-work:retro
+# headless; when the run finishes, reap_jobs posts each NEW file the skill wrote
+# into <workspace>/retro/ as its own message, and a reaction on one applies it —
+# a headless run in the machines-at-work repo (branch + PR), mirroring the
+# logmine offer→react→implement flow. The human gate the retro skill promises
+# survives as the reaction plus the PR merge.
+RETRO_IMPLEMENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "retro-implement.md")
+RETRO_OFFERS_FILE = os.path.join(RUN_DIR, "retro_offers.json")
+
 # decision gate: a build task can carry a `Decision:` the builder can't invent.
 # loop.sh (via the plugin's ask.sh) posts the question into the topic with
 # "Reply to this message to decide" and remembers it here — message_id →
@@ -115,7 +125,7 @@ CLAUDE_TIMEOUT = 300
 # Exact-match trigger tokens (Decision #10). Matching is on the stripped,
 # case-folded message text — "plan" inside a sentence never fires.
 TRIGGERS = {"🧠": "plan", "plan": "plan", "🚀": "loop", "build-all": "loop",
-            "🩹": "unblock", "unblock": "unblock"}
+            "🩹": "unblock", "unblock": "unblock", "📋": "retro", "retro": "retro"}
 
 # Headless plan needs a non-interactive permission model or every plugin script
 # (inbound/freshen/task/linear/notify) hits an approval prompt with nobody to
@@ -147,6 +157,9 @@ HELP = (
     "• 🚀 or build-all — run the build loop (loop.sh, detached).\n"
     "• 🩹 or unblock — diagnose why the build queue is stuck and auto-resolve the "
     "safe cases (finished-but-unmerged, clean retry); the rest are escalated with a reason.\n"
+    "• 📋 or retro — mine this project's finished tasks for pipeline weaknesses "
+    "(headless /machines-at-work:retro); each proposal posts back — react to one "
+    "to apply it as a machines-at-work PR.\n"
     "• checkout — post the checkout options (default branch + each open-PR "
     "state); react to one to check ALL repos out, rebuild with the backend "
     "volumes reset, and get the URLs with the branch behind each.\n"
@@ -644,6 +657,102 @@ def start_logmine_implement(lm, cfg, api):
     return f"logmine implement started for {slug} (pid {pid})"
 
 
+def load_retro_offers():
+    try:
+        return json.load(open(RETRO_OFFERS_FILE))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_retro_offers(offers):
+    if len(offers) > OFFERS_KEEP:  # dict preserves insertion order → drop the oldest
+        offers = dict(list(offers.items())[-OFFERS_KEEP:])
+    os.makedirs(RUN_DIR, exist_ok=True)
+    tmp = RETRO_OFFERS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(offers, f)
+    os.replace(tmp, RETRO_OFFERS_FILE)
+
+
+def _retro_files(workspace):
+    d = os.path.join(workspace, "retro")
+    return sorted(f for f in os.listdir(d) if f.endswith(".md")) if os.path.isdir(d) else []
+
+
+def _proposal_summary(path):
+    """(title, confidence) parsed leniently from a retro report — the first
+    heading and the first line under '## Confidence'. Missing pieces degrade to
+    the filename / empty, never an error: the daemon routes reports, it doesn't
+    understand them."""
+    title, conf = os.path.basename(path), ""
+    try:
+        lines = open(path).read().splitlines()
+    except OSError:
+        return title, conf
+    for i, ln in enumerate(lines):
+        if ln.startswith("# ") and title == os.path.basename(path):
+            title = ln.lstrip("# ").strip()
+        if ln.lower().startswith("## confidence"):
+            conf = next((n.strip().strip("*") for n in lines[i + 1:] if n.strip()), "")
+            break
+    return title, conf
+
+
+def offer_retro_proposals(job, cfg, api):
+    """A finished `retro` run: post each NEW file under <workspace>/retro/ into
+    the topic and remember message_id → file, so a reaction applies it (a
+    headless branch-plus-PR run in the machines-at-work repo). Mirrors the
+    logmine offer→react→implement flow; what a report says is the skill's
+    business — the daemon only routes the file."""
+    new = [f for f in _retro_files(job["workspace"]) if f not in set(job.get("retro_before", []))]
+    if not new:
+        api.send_message(cfg["chat_id"], "📋 retro: no new proposals this run.", job.get("topic"))
+        return "retro: no new proposals"
+    offers = load_retro_offers()
+    for fname in new[:6]:
+        path = os.path.join(job["workspace"], "retro", fname)
+        title, conf = _proposal_summary(path)
+        body = (f"📋 retro proposal · {job['name']}\n{title}\n"
+                + (f"confidence: {conf}\n" if conf else "")
+                + f"\n{fname}\n\nReact to this message to apply it (branch + PR in the machines-at-work repo).")
+        resp = api.send_message(cfg["chat_id"], body, job.get("topic"))
+        mid = (resp or {}).get("result", {}).get("message_id")
+        if mid is not None:
+            offers[str(mid)] = {"file": path, "name": job["name"], "topic": job.get("topic")}
+    save_retro_offers(offers)
+    return f"retro: {len(new[:6])} proposal(s) offered for {job['name']}"
+
+
+def start_retro_apply(ro, cfg, api):
+    """A reaction on a retro proposal message: apply it headless in the
+    machines-at-work repo (branch + PR) — the same shape as logmine's implement.
+    The retro skill's human gate survives as the reaction plus the PR merge;
+    nothing lands on a default branch."""
+    topic = ro.get("topic")
+    path = ro.get("file", "")
+    cwd = _maw_plugin_dir(cfg)
+    if not cwd or not os.path.isdir(cwd):
+        api.send_message(cfg["chat_id"], "⚠️ retro: MAW_SCRIPTS unset or missing — can't apply.", topic)
+        return "retro apply: no plugin dir"
+    if not os.path.isfile(path):
+        api.send_message(cfg["chat_id"], f"⚠️ retro: proposal file is gone: {path}", topic)
+        return f"retro apply: missing {path}"
+    slug = _slug(os.path.splitext(os.path.basename(path))[0])
+    base = f"retro-apply.{slug}"
+    if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
+        api.send_message(cfg["chat_id"], f"⏳ already applying {os.path.basename(path)}.", topic)
+        return f"skip: retro apply already running for {slug}"
+    prompt = open(RETRO_IMPLEMENT).read() + "\n\n=== PROPOSAL ===\n" + open(path).read()
+    try:
+        pid = spawn_detached(["claude", "-p", prompt, "--dangerously-skip-permissions"], cwd, base,
+                             track={"name": slug, "action": "retro-apply", "topic": topic, "report_tail": True})
+    except OSError as e:
+        api.send_message(cfg["chat_id"], f"⚠️ couldn't start the apply: {e}", topic)
+        return f"error: retro apply spawn failed: {e}"
+    api.send_message(cfg["chat_id"], f"🛠 applying {os.path.basename(path)} — a PR will follow.", topic)
+    return f"retro apply started for {slug} (pid {pid})"
+
+
 def process_reaction(r, cfg, api):
     """Handle a message_reaction update. Only an allow-listed user's *added*
     reaction on a remembered checkout-offer or logmine-proposal message does
@@ -661,6 +770,9 @@ def process_reaction(r, cfg, api):
         lm = load_logmine_offers().get(mid)
         if lm:
             return start_logmine_implement(lm, cfg, api)
+        ro = load_retro_offers().get(mid)
+        if ro:
+            return start_retro_apply(ro, cfg, api)
         return f"reaction on non-offer message {mid}, ignored"
     base = os.path.join(RUN_DIR, f"{offer['name']}.checkout.pid")
     if pid_alive(base):
@@ -795,6 +907,11 @@ def reap_jobs(cfg, api):
                 done += f"\n\n{tail}"
             api.send_message(cfg["chat_id"], done, j.get("topic"))
             log(f"{j['action']} for {j['name']} finished ok")
+            if j.get("action") == "retro":   # post the run's new reports, react-to-apply
+                try:
+                    log(offer_retro_proposals(j, cfg, api))
+                except Exception as e:
+                    log(f"retro offer error (non-fatal): {e}")
     _JOBS[:] = still
 
 
@@ -812,14 +929,27 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
         cmd, ack = [os.path.join(scripts, "loop.sh")], "🚀 loop started"
     elif action == "unblock":
         cmd, ack = ["claude", "-p", "/machines-at-work:unblock headless", *PLAN_CLAUDE_FLAGS], "🩹 unblocking…"
+    elif action == "retro":
+        cmd, ack = ["claude", "-p", "/machines-at-work:retro headless", *PLAN_CLAUDE_FLAGS], \
+                   "📋 retro — mining finished tasks; proposals will post back…"
     else:
         cmd, ack = ["claude", "-p", "/machines-at-work:plan headless", *PLAN_CLAUDE_FLAGS], "🧠 planning…"
     base = f"{name}.{action}"
     if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
         return fail(f"skip: {action} already running for {name}", f"{action} is already running")
+    # The agents declare `memory: project`, which claude resolves from cwd. The
+    # registry's workspace is <root>/machines-at-work, so spawning there gave
+    # every headless run a different memory store than an interactive session at
+    # the project root — the stores forked and lessons stopped being delivered
+    # (plugin proposals/2026-07-29-agent-memory-forks-by-cwd.md). Only the spawn
+    # cwd moves; inbox writes, task.sh resolve etc. keep using `workspace`.
+    root = os.path.dirname(workspace) \
+        if os.path.basename(workspace.rstrip("/")) == "machines-at-work" else workspace
+    track = {"name": name, "action": action, "topic": thread_id}
+    if action == "retro":   # reap_jobs posts the files the run adds under retro/
+        track.update(workspace=workspace, retro_before=_retro_files(workspace))
     try:
-        pid = spawn_detached(cmd, workspace, base,
-                             track={"name": name, "action": action, "topic": thread_id})
+        pid = spawn_detached(cmd, root, base, track=track)
     except OSError as e:
         return fail(f"error: spawn {action} failed: {e}", f"couldn't start {action}: {e}")
     api.send_message(cfg["chat_id"], ack, thread_id)

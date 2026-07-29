@@ -211,6 +211,23 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     dropped into a build pipeline is a question, not intent, and silence would hide it — the daemon still
     replies 😱 "only voice notes and text".
 
+16. **Retro rides the existing grammars end to end: trigger → files → offer → react → PR (2026-07-29).**
+    *Objection:* the retro skill is deliberately human-gated — doesn't a phone flow amputate the gate? No:
+    the gate was never "a human types at a terminal", it is "no proposal changes the plugin without a human
+    accepting it", and that survives as the reaction (acceptance) plus the PR merge (application) — nothing
+    the flow spawns may touch a default branch. Mechanically it is two proven patterns composed, no new
+    machinery: `retro` dispatches like 🧠/🩹 (headless skill run, pidfile, reap_jobs completion signal),
+    and the completion hook posts each **new file** under `<workspace>/retro/` — the daemon diffs the
+    directory listing against a snapshot taken at spawn (`retro_before`), parses only a title and a
+    confidence line, and remembers `message_id → file` exactly like logmine's offer map. A reaction spawns
+    `retro-implement.md` in the plugin repo (cwd = plugin root, the guard's dev-session exemption), which
+    applies the proposal's own diff, runs the smoke suite, bumps the version, and opens the PR. The daemon
+    still never interprets a report — the file IS the interface, which is why the same flow works untouched
+    for reports a subagent or a terminal session wrote, as long as they land in `retro/`. Relatedly, every
+    trigger now spawns at the **project root**, not the registered workspace: the agents' `memory: project`
+    store resolves from cwd, and spawning in `<root>/machines-at-work` forked it away from interactive
+    sessions (plugin proposal 2026-07-29-agent-memory-forks-by-cwd).
+
 ## Phased build (each phase independently verifiable)
 - **Phase 1 — outbound leg (in-plugin, smallest, low-risk).** Extend `notify.sh`: creds set → `sendMessage`
   into `TELEGRAM_TOPIC_ID`. *Verify:* `notify.sh "hi"` from a project lands in its topic. Independently useful

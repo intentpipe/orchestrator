@@ -113,6 +113,7 @@ pipeline instead of becoming a note (exact match only — "let's plan later" is 
 | 🧠 or `plan` | headless `/machines-at-work:plan` in the workspace — drains queued notes, posts the task list back into the topic |
 | 🚀 or `build-all` | detached `loop.sh` — set `MAW_SCRIPTS=` in `telegram.env` to the plugin's `scripts/` dir |
 | 🩹 or `unblock` | headless `/machines-at-work:unblock` — diagnoses why the build queue is stuck and auto-resolves the safe cases (finished-but-unmerged, clean retry); the rest are escalated with a precise reason |
+| 📋 or `retro` | headless `/machines-at-work:retro` — mines this project's finished tasks for recurring pipeline weaknesses; each new report posts back as its own message, and **reacting to one applies it**: a headless run in the machines-at-work repo makes the proposed change and opens a PR for you to merge |
 
 🚀 is the plan approval: text intent → 🧠 → read the posted plan → 🚀. A second trigger while
 one is running replies "already running" (pidfiles + child logs under `~/.agent-orchestrator/run/`).

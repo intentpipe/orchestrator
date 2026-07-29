@@ -12,7 +12,10 @@ dispatch a trigger token (Decision #10: 🧠/`plan` → headless /machines-at-wo
 exact match only) or transcribe voice / take
 text and drop the RAW message into <workspace>/updates/.inbox/<epoch>-<msgid>.md
 — machines-at-work's inbound.sh contract; the plugin names and formats notes,
-never the daemon. Every allow-listed message gets a reaction lifecycle:
+never the daemon. An image (photo, or an image/* document) is intent too: it is
+downloaded next to its caption note under the same <epoch>-<msgid> base and
+referenced by bare basename ([image: <name>]); inbound.sh turns it into a
+permanent resources/ file the plan reads (plugin DESIGN #37). Every allow-listed message gets a reaction lifecycle:
 👀 received → 👌 queued/started, or 😱 + a reply saying what went wrong.
 
 Keyword `status` short-circuits routing and replies with a live report
@@ -149,7 +152,9 @@ HELP = (
     "volumes reset, and get the URLs with the branch behind each.\n"
     "• relaunch — rebuild this project's preview stack from the CURRENT checkout "
     "(no branch switch, dev database kept) and post its URLs + branches.\n"
-    "• anything else (text or voice) — dropped as an intent note for the next plan.\n"
+    "• anything else (text, voice, or an image with optional caption) — dropped "
+    "as an intent note for the next plan; an image becomes a permanent resource "
+    "the plan looks at (mockup, bug screenshot, sketch).\n"
     "\n"
     "In the General topic:\n"
     "• anything (text or voice) — answered by a one-shot claude run."
@@ -230,6 +235,16 @@ class TelegramAPI:
         url = f"{self.base.replace('/bot', '/file/bot')}/{path}"
         urllib.request.urlretrieve(url, dest)
         return dest
+
+    def download_file(self, file_id, dest_base, ext=None):
+        """Download any Telegram file to dest_base + extension — taken from
+        Telegram's file_path unless the caller already knows better (a document
+        keeps its own name's extension). Returns the final path."""
+        path = self._call("getFile", {"file_id": file_id})["result"]["file_path"]
+        ext = ext or os.path.splitext(path)[1] or ".jpg"
+        url = f"{self.base.replace('/bot', '/file/bot')}/{path}"
+        urllib.request.urlretrieve(url, dest_base + ext)
+        return dest_base + ext
 
 
 def transcribe(path):
@@ -659,6 +674,34 @@ def process_reaction(r, cfg, api):
     return f"checkout+build started for {offer['name']} [{offer['label']}] (pid {pid})"
 
 
+def image_payload(msg):
+    """(file_id, ext_hint) when the message carries an image — a compressed photo
+    (largest size Telegram offers) or an image/* document (a screenshot sent as a
+    file, full quality). None otherwise."""
+    if "photo" in msg:
+        return msg["photo"][-1]["file_id"], None
+    doc = msg.get("document")
+    if doc and doc.get("mime_type", "").startswith("image/"):
+        return doc["file_id"], os.path.splitext(doc.get("file_name", ""))[1] or None
+    return None
+
+
+def write_image_inbox(workspace, msg, api, file_id, ext_hint):
+    """An image texted into a project topic: download it NEXT TO its caption note
+    in updates/.inbox/ under the same <epoch>-<msgid> base, the note referencing
+    it by bare basename ([image: <name>]). Still a raw drop: the plugin's
+    inbound.sh moves the image to resources/ and rewrites the reference (its
+    DESIGN #37) — the daemon never learns the workspace's conventions."""
+    inbox = os.path.join(workspace, "updates", ".inbox")
+    os.makedirs(inbox, exist_ok=True)
+    base = f"{msg['date']}-{msg['message_id']}"
+    img = api.download_file(file_id, os.path.join(inbox, base), ext_hint)
+    caption = (msg.get("caption") or "").strip()
+    with open(os.path.join(inbox, base + ".md"), "w") as f:
+        f.write((caption + "\n\n" if caption else "") + f"[image: {os.path.basename(img)}]\n")
+    return base + ".md"
+
+
 def write_inbox(workspace, text, msg):
     """Raw drop per machines-at-work's inbound.sh contract (its DESIGN #27):
     updates/.inbox/<epoch>-<msgid>.md, lexical = chronological. Naming and
@@ -904,6 +947,18 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
     action = TRIGGERS.get(stripped)
     if action:
         return dispatch(action, entry, cfg, api, thread_id, react, fail)
+
+    # An image (photo, or a screenshot sent as a file) is intent like text: it
+    # drops into the inbox next to its caption note, and the next plan reads the
+    # picture itself — a mockup, a bug screenshot, a sketch.
+    img = image_payload(msg)
+    if img:
+        try:
+            name = write_image_inbox(workspace, msg, api, *img)
+        except Exception as e:
+            return fail(f"error: image download failed: {e}", f"couldn't fetch that image: {e}")
+        react("👌")
+        return f"queued image → {entry['name']}/updates/.inbox/{name}"
 
     try:
         kind, text = instruction_text(msg, api, cfg, thread_id)

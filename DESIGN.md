@@ -198,6 +198,19 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     that lands five tasks rebuilds once, for the last branch. The plugin defers to the end of a loop run
     for the same reason from the other side.
 
+15. **An image is intent, and the daemon stays a pipe: photos ride the raw-drop contract.** *Objection:*
+    a photo isn't a note — shouldn't the daemon describe it, or hand it to a vision model, before the plan
+    sees it? No: interpretation is exactly what the raw-drop contract (#1, plugin DESIGN #27) keeps out of
+    the daemon, and the planner can already see images — describing a mockup in prose before a multimodal
+    model reads it only loses information. So the daemon downloads the image (largest photo size, or an
+    `image/*` document verbatim — screenshots sent "as file" keep full quality and their extension) next to
+    its caption note in `updates/.inbox/`, same `<epoch>-<msgid>` base pairing the two, and the note
+    references it by bare basename (`[image: <name>]`). What an image *becomes* — a permanent
+    `resources/tg-*` file, the rewritten reference, the `Resources:` field on planned tasks — is entirely
+    the plugin's inbound.sh/plan business (its DESIGN #37). Non-image documents stay unsupported: a PDF
+    dropped into a build pipeline is a question, not intent, and silence would hide it — the daemon still
+    replies 😱 "only voice notes and text".
+
 ## Phased build (each phase independently verifiable)
 - **Phase 1 — outbound leg (in-plugin, smallest, low-risk).** Extend `notify.sh`: creds set → `sendMessage`
   into `TELEGRAM_TOPIC_ID`. *Verify:* `notify.sh "hi"` from a project lands in its topic. Independently useful

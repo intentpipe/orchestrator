@@ -27,6 +27,9 @@ class FakeAPI:
         return {"result": {"message_id": self._mid}}  # offer_checkout keys the map on this
     def set_reaction(self, chat, mid, emoji): self.reactions.append((mid, emoji))
     def download_voice(self, fid, dest): open(dest, "wb").write(b"x")
+    def download_file(self, fid, base, ext=None):
+        self.downloads = getattr(self, "downloads", []); self.downloads.append((fid, ext))
+        p = base + (ext or ".jpg"); open(p, "wb").write(b"img"); return p
 api = FakeAPI()
 mk = lambda **kw: {"from": {"id": 42}, "chat": {"id": -100}, "message_id": kw.pop("mid", 1),
                    "date": kw.pop("date", 1700000000), "message_thread_id": 5, **kw}
@@ -67,10 +70,29 @@ daemon.transcribe = lambda p: "hello from voice"
 assert daemon.process_message(mk(voice={"file_id": "a"}, date=1700000002, mid=8), cfg, reg, api).startswith("queued voice")
 assert "1700000002-8.md" in ls() and "hello from voice" in open(os.path.join(inbox, "1700000002-8.md")).read()
 assert api.sent[-1] == (5, "🎙 > hello from voice")
-# unsupported type (photo etc.) → 😱 + reply
+# photo in a project topic → image + caption note dropped TOGETHER under the same
+# <epoch>-<msgid> base, note referencing the image by bare basename — moving it to
+# resources/ and rewriting the reference is inbound.sh's job, not the daemon's
 api = FakeAPI()
-assert daemon.process_message(mk(photo=[{"file_id": "p"}], mid=9), cfg, reg, api).startswith("skip: only voice notes")
-assert api.reactions[-1] == (9, "😱") and "voice notes and text" in api.sent[-1][1]
+assert daemon.process_message(mk(photo=[{"file_id": "small"}, {"file_id": "LARGE"}],
+                                 caption="build this mockup", date=1700000005, mid=9),
+                              cfg, reg, api).startswith("queued image")
+assert api.downloads[-1][0] == "LARGE", "must fetch the largest photo size"
+assert "1700000005-9.jpg" in ls() and "1700000005-9.md" in ls(), ls()
+note = open(os.path.join(inbox, "1700000005-9.md")).read()
+assert note == "build this mockup\n\n[image: 1700000005-9.jpg]\n", note
+assert api.reactions == [(9, "👀"), (9, "👌")] and not api.sent, "image note: reaction only, no reply"
+# a screenshot sent as a FILE (image/* document) rides the same path, keeping its
+# extension; a caption-less image still gets a note (the picture IS the intent)
+assert daemon.process_message(mk(document={"file_id": "d", "mime_type": "image/png", "file_name": "shot.png"},
+                                 date=1700000006, mid=90), cfg, reg, api).startswith("queued image")
+assert "1700000006-90.png" in ls(), ls()
+assert open(os.path.join(inbox, "1700000006-90.md")).read() == "[image: 1700000006-90.png]\n"
+# unsupported type (non-image document etc.) → 😱 + reply
+api = FakeAPI()
+assert daemon.process_message(mk(document={"file_id": "z", "mime_type": "application/pdf"}, mid=91),
+                              cfg, reg, api).startswith("skip: only voice notes")
+assert api.reactions[-1] == (91, "😱") and "voice notes and text" in api.sent[-1][1]
 
 # trigger tokens: exact match only, dispatch instead of note. Stub the spawner.
 spawns = []

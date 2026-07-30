@@ -84,6 +84,9 @@ PULL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts"
 CHECKOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "checkout.py")
 PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "plugin.py")
 RELAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relaunch")
+# `relaunch` skips the rebuild when the preview already serves the checked-out
+# commits; `relaunch force` is the same keyword with that check turned off.
+RELAUNCH_WORDS = ("relaunch", "relaunch force")
 # message_id → offer map for `checkout`: reacting to an offer message triggers its
 # build. Persisted so an offer survives the restart between posting and reacting.
 OFFERS_FILE = os.path.join(RUN_DIR, "checkout_offers.json")
@@ -168,7 +171,9 @@ HELP = (
     "state); react to one to check ALL repos out, rebuild with the backend "
     "volumes reset, and get the URLs with the branch behind each.\n"
     "• relaunch — rebuild this project's preview stack from the CURRENT checkout "
-    "(no branch switch, dev database kept) and post its URLs + branches.\n"
+    "(no branch switch, dev database kept) and post its URLs + branches. Already "
+    "serving these commits? it just re-posts the URLs — `relaunch force` rebuilds "
+    "anyway.\n"
     "• anything else (text, voice, or an image with optional caption) — dropped "
     "as an intent note for the next plan; an image becomes a permanent resource "
     "the plan looks at (mockup, bug screenshot, sketch).\n"
@@ -1050,7 +1055,7 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
 
     # relaunch is project-scoped — it rebuilds ONE project's preview. In a topic
     # with no workspace, say so rather than firing a free-form `claude -p`.
-    if stripped == "relaunch" and not entry:
+    if stripped in RELAUNCH_WORDS and not entry:
         return fail("skip: relaunch needs a project topic",
                     "run `relaunch` inside a project topic — it rebuilds that project's preview.")
 
@@ -1071,13 +1076,19 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
     # `relaunch`: rebuild just this project's preview stack (down → fresh up) and
     # post the new frontend URL. Detached — the rebuild takes minutes; relaunch
     # posts the URL (or a failure) into the topic itself when it's done.
-    if stripped == "relaunch":
+    if stripped in RELAUNCH_WORDS:
         name = entry["name"]
         base = f"{name}.relaunch"
         if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
             return fail(f"skip: relaunch already running for {name}", "a relaunch is already running")
+        # A plain `relaunch` no-ops when the preview already serves the checked-out
+        # commits (relaunch's build watermark). `relaunch force` is the way to say
+        # "I don't care what the watermark thinks, build it again" from the phone —
+        # the only escape hatch a Telegram user has when a preview looks wrong in a
+        # way the watermark can't see.
+        argv = [RELAUNCH, name] if stripped == "relaunch" else [RELAUNCH, "--force", name]
         try:
-            pid = spawn_detached([RELAUNCH, name], os.path.dirname(RELAUNCH), base)
+            pid = spawn_detached(argv, os.path.dirname(RELAUNCH), base)
         except OSError as e:
             return fail(f"error: spawn relaunch failed: {e}", f"couldn't start relaunch: {e}")
         api.send_message(cfg["chat_id"], f"🚀 relaunching {name} — the fresh frontend URL will follow.", thread_id)

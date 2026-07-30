@@ -52,7 +52,11 @@ one interpretation path — everything else in this daemon stays deterministic.
 Config (all under $ORCH_HOME, default ~/.agent-orchestrator):
   telegram.env   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALLOWLIST (space/comma ids),
                  MAW_SCRIPTS (path to the machines-at-work plugin's scripts/, for 🚀),
-                 GENERAL_WORKSPACE (cwd for a General-topic `claude -p`)
+                 GENERAL_WORKSPACE (cwd for a General-topic `claude -p`),
+                 PLAN_MODEL (model for the headless 🧠 plan run; default
+                 claude-fable-5 — planning is the pipeline's highest-judgment,
+                 lowest-token step, so it gets the strongest model; 🚀 build
+                 cost lives in loop.sh's own MODEL knob, default opus)
   registry.json  {"<thread_id>": {"name": ..., "workspace": "/abs/scaffold-dir"}}
   offset         last processed update_id (persisted, so restarts don't replay)
   run/           <name>.{plan,loop}.{pid,log} — double-launch guard + child logs
@@ -933,7 +937,13 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
         cmd, ack = ["claude", "-p", "/machines-at-work:retro headless", *PLAN_CLAUDE_FLAGS], \
                    "📋 retro — mining finished tasks; proposals will post back…"
     else:
-        cmd, ack = ["claude", "-p", "/machines-at-work:plan headless", *PLAN_CLAUDE_FLAGS], "🧠 planning…"
+        # Plan is the one dispatch that gets an explicit model: it is judgment
+        # over intent (decompose, feature boundaries, Decision: gates) and its
+        # short sessions make the strongest model cheap relative to the build
+        # iterations a bad decomposition costs. unblock/retro stay on the CLI
+        # default; loop.sh pins its own (MODEL=opus|sonnet|fable).
+        cmd, ack = ["claude", "-p", "/machines-at-work:plan headless",
+                    "--model", cfg["plan_model"], *PLAN_CLAUDE_FLAGS], "🧠 planning…"
     base = f"{name}.{action}"
     if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
         return fail(f"skip: {action} already running for {name}", f"{action} is already running")
@@ -1111,7 +1121,8 @@ def build_config(env):
                  f"to {ENV_FILE}.")
     return {"token": token, "chat_id": env.get("TELEGRAM_CHAT_ID"),
             "allowlist": allowlist, "maw_scripts": env.get("MAW_SCRIPTS"),
-            "general_workspace": env.get("GENERAL_WORKSPACE")}
+            "general_workspace": env.get("GENERAL_WORKSPACE"),
+            "plan_model": env.get("PLAN_MODEL", "claude-fable-5")}
 
 
 def run(once=False):

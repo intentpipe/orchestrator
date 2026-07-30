@@ -269,6 +269,10 @@ def build(offer):
     # relaunch rebuilds whatever is now checked out and posts the URLs itself.
     # --reset: the branch may carry different migrations, so the backend's volumes
     # go with it — otherwise the new code serves the old branch's database.
+    # When pass 2 moved nothing — the repos already stood on these commits and a
+    # relaunch minutes ago already built them — relaunch's watermark check makes
+    # this a no-op that just re-posts the URLs: no down -v, no ~4-minute rebuild,
+    # and the seeded database survives. `relaunch --force` is the override.
     subprocess.run([RELAUNCH, "--reset", offer["name"]])
 
 

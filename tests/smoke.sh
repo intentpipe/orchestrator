@@ -66,12 +66,21 @@ assert api.sent[-1] == (77, "report(ws=None)") and api.reactions[-1] == (22, "�
 api = FakeAPI()
 assert daemon.process_message(mk(text="help", message_thread_id=77, mid=23), cfg, reg, api) == "help sent"
 assert "logmine" in api.sent[-1][1] and "one-shot claude" not in api.sent[-1][1], "help must not advertise a removed feature"
-# text → RAW drop at updates/.inbox/<epoch>-<msgid>.md, 👀→👌, NO reply text
+# …and HELP must describe the acks it actually sends, now that they differ.
+assert "✍" in api.sent[-1][1], "help must name the note reaction"
+assert "no project" in api.sent[-1][1], "help must say what an unregistered topic does"
+# text → RAW drop at updates/.inbox/<epoch>-<msgid>.md, 👀→✍, NO reply text.
+# The note ack must be a DIFFERENT emoji from the command ack: the note path
+# sends no reply, so while both were 👌 a swallowed message looked like a
+# started run. Pinned to the literal — Telegram bots may only react from a
+# fixed set, and it carries ✍ bare (U+270D), not ✍️ with the U+FE0F selector.
+assert daemon.NOTED == "✍" and daemon.NOTED != "👌", repr(daemon.NOTED)
 api = FakeAPI()
 assert daemon.process_message(mk(text="add dark mode", date=1700000001, mid=7), cfg, reg, api).startswith("queued text")
 assert ls() == ["1700000001-7.md"], ls()
 assert open(os.path.join(inbox, "1700000001-7.md")).read() == "add dark mode\n", "must be raw — no header, plugin owns format"
-assert api.reactions == [(7, "👀"), (7, "👌")] and not api.sent, "text note: reaction only, no reply"
+assert api.reactions == [(7, "👀"), (7, daemon.NOTED)] and not api.sent, \
+    "text note: reaction only, no reply — and ✍ not 👌, so a note never looks like a started trigger"
 # voice → transcribed (stubbed) → raw drop + transcript quoted back
 daemon.transcribe = lambda p: "hello from voice"
 assert daemon.process_message(mk(voice={"file_id": "a"}, date=1700000002, mid=8), cfg, reg, api).startswith("queued voice")
@@ -88,7 +97,7 @@ assert api.downloads[-1][0] == "LARGE", "must fetch the largest photo size"
 assert "1700000005-9.jpg" in ls() and "1700000005-9.md" in ls(), ls()
 note = open(os.path.join(inbox, "1700000005-9.md")).read()
 assert note == "build this mockup\n\n[image: 1700000005-9.jpg]\n", note
-assert api.reactions == [(9, "👀"), (9, "👌")] and not api.sent, "image note: reaction only, no reply"
+assert api.reactions == [(9, "👀"), (9, daemon.NOTED)] and not api.sent, "image note: reaction only, no reply"
 # a screenshot sent as a FILE (image/* document) rides the same path, keeping its
 # extension; a caption-less image still gets a note (the picture IS the intent)
 assert daemon.process_message(mk(document={"file_id": "d", "mime_type": "image/png", "file_name": "shot.png"},
@@ -144,6 +153,30 @@ assert ls() == before, "triggers must not write inbox files"
 n = len(spawns)
 assert daemon.process_message(mk(text="let's plan this later", date=1700000003, mid=13), cfg, reg, api).startswith("queued text")
 assert len(spawns) == n and "1700000003-13.md" in ls()
+# NEAR-MISS on a trigger: a short message carrying a trigger emoji without being
+# one (the `I🚀` that fell through to the inbox on 2026-07-30) is REFUSED — it
+# neither runs nor becomes a note, and the reply names the trigger it resembles.
+api = FakeAPI(); n, before = len(spawns), ls()
+assert daemon.process_message(mk(text="I🚀", date=1700000007, mid=140), cfg, reg, api) \
+    == "skip: near-miss trigger 'i🚀'"
+assert len(spawns) == n, "a near-miss must never auto-fire the trigger it resembles"
+assert ls() == before, "a near-miss must never be filed as an intent note"
+assert api.reactions[-1] == (140, "😱") and "🚀" in api.sent[-1][1], api.sent
+# every command emoji is guarded, including 🔌 (a keyword short-circuit, not a
+# TRIGGERS entry) — and the guard sits AFTER the exact-match table, so the clean
+# token still dispatches
+for txt, mid in (("x🧠", 141), ("🩹?", 142), (".📋", 143), ("a🔌", 144)):
+    assert daemon.process_message(mk(text=txt, mid=mid), cfg, reg, api).startswith("skip: near-miss"), txt
+assert ls() == before and len(spawns) == n
+assert daemon.process_message(mk(text="🚀", mid=145), cfg, reg, api).startswith("loop started"), \
+    "the guard must not shadow the exact token"
+n = len(spawns)   # that dispatch was deliberate; re-baseline for the checks below
+# …but a real note that merely CONTAINS a trigger emoji is still a note: the
+# guard is length-bounded, so intent never gets refused for mentioning a rocket
+api = FakeAPI()
+assert daemon.process_message(mk(text="ship it 🚀 today", date=1700000008, mid=146), cfg, reg, api) \
+    .startswith("queued text"), "the guard must not eat real intent notes"
+assert "1700000008-146.md" in ls() and api.reactions[-1] == (146, daemon.NOTED)
 # live pidfile → "already running", no second spawn
 os.makedirs(daemon.RUN_DIR, exist_ok=True)
 open(os.path.join(daemon.RUN_DIR, "proj.loop.pid"), "w").write(str(os.getpid()))

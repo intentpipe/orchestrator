@@ -18,7 +18,8 @@ sys.path.insert(0, orch)
 import daemon
 daemon.RUN_DIR = os.path.join(tmp, "run")
 ws = os.path.join(tmp, "dws", "scaffold"); os.makedirs(ws)
-cfg = {"chat_id": "-100", "allowlist": {"42"}, "maw_scripts": "/opt/maw/scripts"}
+cfg = {"chat_id": "-100", "allowlist": {"42"}, "maw_scripts": "/opt/maw/scripts",
+       "plan_model": "claude-fable-5"}  # mirrors build_config's default
 reg = {"5": {"name": "proj", "workspace": ws}}
 class FakeAPI:
     def __init__(self): self.sent = []; self.reactions = []; self._mid = 0
@@ -99,7 +100,9 @@ spawns = []
 daemon.spawn_detached = lambda cmd, cwd, base, track=None: spawns.append((cmd, cwd, base)) or 4242
 api = FakeAPI(); before = ls()
 assert daemon.process_message(mk(text="🧠", mid=10), cfg, reg, api) == "plan started for proj (pid 4242)"
-assert spawns[-1] == (["claude", "-p", "/machines-at-work:plan headless", *daemon.PLAN_CLAUDE_FLAGS], ws, "proj.plan")
+assert spawns[-1] == (["claude", "-p", "/machines-at-work:plan headless",
+                       "--model", "claude-fable-5", *daemon.PLAN_CLAUDE_FLAGS], ws, "proj.plan"), \
+    "plan runs on PLAN_MODEL (judgment step gets the strongest model); unblock/retro stay on the CLI default"
 assert "--permission-mode" in spawns[-1][0] and "Bash" in " ".join(spawns[-1][0]), "headless plan must run non-interactively"
 assert api.reactions == [(10, "👀"), (10, "👌")] and api.sent[-1][1] == "🧠 planning…"
 assert daemon.process_message(mk(text=" PLAN ", mid=11), cfg, reg, api).startswith("plan started"), "case/whitespace-insensitive"

@@ -159,6 +159,29 @@ POLL_BACKOFF_MAX = 120
 TRIGGERS = {"🧠": "plan", "plan": "plan", "🚀": "loop", "build-all": "loop",
             "🩹": "unblock", "unblock": "unblock", "📋": "retro", "retro": "retro"}
 
+# Emoji that mean "run something" — the TRIGGERS ones plus 🔌, which is a
+# keyword short-circuit rather than a table entry. A message that is *almost*
+# one of these is the near-miss the guard in _route catches.
+COMMAND_EMOJI = {k for k in TRIGGERS if not k.isascii()} | {"🔌"}
+
+# A message this short that still contains a command emoji is a fat-fingered
+# trigger, never intent worth planning: on 2026-07-30 a `I🚀` (a stray key
+# before the rocket) missed the exact-match table, fell through to the note
+# path and was filed into tell-your-friends' inbox as garbage intent for the
+# next 🧠. The guard REFUSES rather than guessing which trigger was meant —
+# `no 🚀` is also five characters, and auto-firing would spawn a build loop
+# from an ambiguous message. Refusing costs the user one retap; guessing wrong
+# costs a wrong run.
+NEAR_MISS_CHARS = 5
+
+# Reaction for "filed as an intent note", as opposed to 👌 = "command ran".
+# They used to share 👌, and the note path sends no reply at all (deliberate —
+# every note would otherwise be chat noise), so a message that quietly became a
+# note was indistinguishable from a trigger that started. Bare ✍ with no
+# variation selector: Telegram's fixed bot-reaction set carries it that way,
+# and ✍️ (with U+FE0F) is a different string.
+NOTED = "✍"
+
 # Headless plan needs a non-interactive permission model or every plugin script
 # (inbound/freshen/task/linear/notify) hits an approval prompt with nobody to
 # answer it and is denied — and the run can't reach the sibling code repos. This
@@ -200,8 +223,11 @@ HELP = (
     "serving these commits? it just re-posts the URLs — `relaunch force` rebuilds "
     "anyway.\n"
     "• anything else (text, voice, or an image with optional caption) — dropped "
-    "as an intent note for the next plan; an image becomes a permanent resource "
-    "the plan looks at (mockup, bug screenshot, sketch).\n"
+    "as an intent note for the next plan (reaction ✍, not 👌); an image becomes "
+    "a permanent resource the plan looks at (mockup, bug screenshot, sketch). A "
+    "very short message containing a trigger emoji but not equal to one (a "
+    "mistyped 🚀) is refused rather than filed, so a fat-fingered trigger never "
+    "becomes a note.\n"
     "\n"
     "In the General topic:\n"
     "• anything (text or voice) — answered by a one-shot claude run."
@@ -291,7 +317,7 @@ class TelegramAPI:
 
     def set_reaction(self, chat_id, message_id, emoji):
         # Bots may only react with Telegram's fixed emoji set (no ✅/⚠️/⏳ —
-        # hence 👀/👌/😱). Calling again replaces the previous reaction.
+        # hence 👀/👌/✍/😱). Calling again replaces the previous reaction.
         return self._call("setMessageReaction", {
             "chat_id": chat_id, "message_id": message_id,
             "reaction": json.dumps([{"type": "emoji", "emoji": emoji}]),
@@ -1292,6 +1318,17 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
     if action:
         return dispatch(action, entry, cfg, api, thread_id, react, fail)
 
+    # Near-miss on a trigger (see COMMAND_EMOJI / NEAR_MISS_CHARS): too short to
+    # be intent, too close to a command to file as one. Say so instead of
+    # silently queueing it — the note path's only feedback is a reaction, so a
+    # swallowed trigger looks exactly like a started one.
+    near = next((e for e in COMMAND_EMOJI if e in stripped), None)
+    if near and len(stripped) <= NEAR_MISS_CHARS:
+        return fail(f"skip: near-miss trigger {stripped!r}",
+                    f"that looked like {near} but isn't exactly it — nothing ran, "
+                    f"and it was NOT filed as a note. Send just {near} to run it, "
+                    "or say more to queue it as an intent note.")
+
     # An image (photo, or a screenshot sent as a file) is intent like text: it
     # drops into the inbox next to its caption note, and the next plan reads the
     # picture itself — a mockup, a bug screenshot, a sketch.
@@ -1301,7 +1338,7 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
             name = write_image_inbox(workspace, msg, api, *img)
         except Exception as e:
             return fail(f"error: image download failed: {e}", f"couldn't fetch that image: {e}")
-        react("👌")
+        react(NOTED)
         return f"queued image → {entry['name']}/updates/.inbox/{name}"
 
     try:
@@ -1310,7 +1347,7 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
         return fail(f"skip: {e}", str(e))
 
     name = write_inbox(workspace, text, msg)
-    react("👌")
+    react(NOTED)
     return f"queued {kind} → {entry['name']}/updates/.inbox/{name}"
 
 

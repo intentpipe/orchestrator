@@ -110,7 +110,7 @@ pipeline instead of becoming a note (exact match only — "let's plan later" is 
 
 | token | action |
 |---|---|
-| 🧠 or `plan` | headless `/machines-at-work:plan` in the workspace — drains queued notes, posts the task list back into the topic |
+| 🧠 or `plan` | headless `/machines-at-work:plan` in the workspace — drains queued notes, posts the task list back into the topic. Runs on `PLAN_MODEL` (telegram.env, default `claude-fable-5`): planning is the pipeline's highest-judgment, lowest-token step, so it gets the strongest model — build cost is loop.sh's own `MODEL` knob |
 | 🚀 or `build-all` | detached `loop.sh` — set `MAW_SCRIPTS=` in `telegram.env` to the plugin's `scripts/` dir |
 | 🩹 or `unblock` | headless `/machines-at-work:unblock` — diagnoses why the build queue is stuck and auto-resolves the safe cases (finished-but-unmerged, clean retry); the rest are escalated with a precise reason |
 | 📋 or `retro` | headless `/machines-at-work:retro` — mines this project's finished tasks for recurring pipeline weaknesses; each new report posts back as its own message, and **reacting to one applies it**: a headless run in the machines-at-work repo makes the proposed change and opens a PR for you to merge |
@@ -232,8 +232,17 @@ to a PR's branches (that path resets the backend volumes; this one deliberately 
 so a `relaunch` never throws away the dev data you were looking at).
 
 Runs detached (`relaunch <name>`; the rebuild takes minutes) and speaks for itself in the
-topic when it's done. The script also runs from a shell: `relaunch [--reset] [project]`,
-no argument = every registered project.
+topic when it's done. The script also runs from a shell: `relaunch [--reset] [--force]
+[project]`, no argument = every registered project.
+
+A rebuild that would change nothing is skipped: each successful build records the
+repo/branch/sha it served (`<state-dir>/build-watermark`), and a later relaunch or
+checkout that finds every repo on those same commits — with the static server and the
+containers still alive — just re-posts the URLs. That is what keeps a `checkout` onto the
+branch a relaunch already built from spending four minutes and a `down -v` on an identical
+result. Anything else (a new commit, a dirty tree, a dead server, a stopped backend)
+rebuilds as before; `relaunch force` in the topic (or `relaunch --force` in a shell)
+rebuilds unconditionally.
 
 ## Keyword: `help`
 

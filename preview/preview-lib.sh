@@ -45,6 +45,9 @@
 #   BACKEND_RESET_VOLUMES=1   `down -v` first: the branch's migrations replay
 #                             against an empty DB (implies --force-recreate).
 #                             Set by `checkout` and by `relaunch --reset`.
+#   PREVIEW_FORCE_REBUILD=1   rebuild even when the watermark says the running
+#                             preview already serves these commits (`relaunch
+#                             --force`).
 #   FRONTEND_REPO_DIR / BACKEND_REPO_DIR
 #                  git repos `checkout` switches; default to FRONTEND_DIR /
 #                  BACKEND_DIR, which is right when the build dir IS the repo
@@ -202,12 +205,57 @@ stop_frontend() {
   fi
 }
 
+# ── Build watermark ─────────────────────────────────────────────────────────
+# "guaranteed current" costs ~4 minutes (docker down -v + the release web build)
+# and throws away the seeded database — worth paying when the code moved, pure
+# waste when it didn't. A checkout that lands on the branch a relaunch minutes
+# earlier already built rebuilt the identical bundle five times in a row. So each
+# successful build records the exact repo/branch/sha it served, and `up` compares
+# that watermark against the repos as they stand now: identical everywhere, with
+# the static server and the containers still alive, means the running preview IS
+# the answer — print the URLs instead of rebuilding it. PREVIEW_FORCE_REBUILD=1
+# (`relaunch --force`) always rebuilds.
+WATERMARK="$STATE_DIR/build-watermark"
+
+_watermark_now() {
+  local dir
+  for dir in "$FRONTEND_REPO_DIR" "$BACKEND_REPO_DIR"; do
+    printf '%s\t%s\n' "$(basename "$dir")" "$(_repo_state "$dir")"
+  done
+}
+
+write_watermark() { _watermark_now > "$WATERMARK"; }
+
+# True when the running preview already serves exactly what is checked out now.
+preview_current() {
+  if [ "${PREVIEW_FORCE_REBUILD:-0}" = 1 ]; then return 1; fi
+  if [ ! -f "$WATERMARK" ] || [ ! -f "$WEB_DIR/index.html" ]; then return 1; fi
+  # Both halves must actually be serving: a live bundle in front of a stopped
+  # backend is not "current", it's half a preview.
+  if ! is_up "$STATE_DIR/web-serve.pid"; then return 1; fi
+  if [ -z "$( (cd "$BACKEND_DIR" && DC ps -q --status running) 2>/dev/null)" ]; then return 1; fi
+  local now; now=$(_watermark_now)
+  # A dirty tree has no stable identity — same sha, different content — so it is
+  # never current; someone editing in place still gets their build.
+  case "$now" in *dirty*) return 1 ;; esac
+  [ "$now" = "$(cat "$WATERMARK")" ]
+}
+
 # Every relaunch (up/restart/rebuild) recompiles first so the preview can never
 # serve a stale build. The static server itself never dies; the ~80s
 # `flutter build web --release` is the cost of guaranteed-current previews.
-cmd_up()      { start_backend; stop_frontend; sleep 1; build_frontend; serve_frontend; echo; cmd_urls; }
+cmd_up() {
+  if preview_current; then
+    echo "[preview] already serving the checked-out commits with a live server —"
+    echo "[preview] skipping the rebuild (PREVIEW_FORCE_REBUILD=1 / 'relaunch --force' to rebuild anyway)"
+    echo; cmd_urls; return
+  fi
+  start_backend; stop_frontend; sleep 1; build_frontend; serve_frontend; write_watermark; echo; cmd_urls
+}
 cmd_down()    { stop_frontend; (cd "$BACKEND_DIR" && DC stop); }
-cmd_restart() { stop_frontend; sleep 1; build_frontend; serve_frontend; cmd_urls; }
+# restart/rebuild are the explicit "build it again" commands — they never consult
+# the watermark, they refresh it.
+cmd_restart() { stop_frontend; sleep 1; build_frontend; serve_frontend; write_watermark; cmd_urls; }
 cmd_rebuild() { cmd_restart; }   # kept for muscle memory; identical to restart
 
 # True when $2 names a branch in repo $1, locally or on origin. A bare
@@ -390,11 +438,12 @@ preview_main() {
     rebuild|rebuild-frontend|restart-app) cmd_rebuild ;;
     checkout|switch)                      cmd_checkout "${2:-}" ;;
     status)                               cmd_status ;;
+    current)                              preview_current ;;
     urls)                                 cmd_urls ;;
     branches)                             cmd_branches ;;
     logs)                                 cmd_logs "${2:-web-serve}" "${3:-40}" ;;
     *)
-      echo "usage: $0 {up|down|restart|rebuild|checkout <branch>|status|urls|branches|logs [name] [n]}"
+      echo "usage: $0 {up|down|restart|rebuild|checkout <branch>|status|current|urls|branches|logs [name] [n]}"
       echo "  up        start backend (docker) + recompile & serve the frontend on :$FRONTEND_PORT"
       echo "  down      stop the frontend server and 'docker compose stop' the backend"
       echo "  restart   recompile the frontend and re-serve (always picks up code/.env changes)"
@@ -402,6 +451,7 @@ preview_main() {
       echo "  checkout <branch>  switch BOTH repos to <branch>, reset the backend"
       echo "                     volumes + recreate it, then recompile & serve"
       echo "  status    docker ps + frontend + tunnel state + URLs"
+      echo "  current   exit 0 when the running preview already serves the checked-out commits"
       echo "  urls      show the persistent preview URLs + the branch behind each"
       echo "  branches  repo/branch/sha per served repo, tab-separated"
       echo "  logs [name] [n]   tail a state log (default web-serve, 40 lines)"

@@ -18,7 +18,8 @@ sys.path.insert(0, orch)
 import daemon
 daemon.RUN_DIR = os.path.join(tmp, "run")
 ws = os.path.join(tmp, "dws", "scaffold"); os.makedirs(ws)
-cfg = {"chat_id": "-100", "allowlist": {"42"}, "maw_scripts": "/opt/maw/scripts"}
+cfg = {"chat_id": "-100", "allowlist": {"42"}, "maw_scripts": "/opt/maw/scripts",
+       "plan_model": "claude-fable-5"}  # mirrors build_config's default
 reg = {"5": {"name": "proj", "workspace": ws}}
 class FakeAPI:
     def __init__(self): self.sent = []; self.reactions = []; self._mid = 0
@@ -99,7 +100,9 @@ spawns = []
 daemon.spawn_detached = lambda cmd, cwd, base, track=None: spawns.append((cmd, cwd, base)) or 4242
 api = FakeAPI(); before = ls()
 assert daemon.process_message(mk(text="🧠", mid=10), cfg, reg, api) == "plan started for proj (pid 4242)"
-assert spawns[-1] == (["claude", "-p", "/machines-at-work:plan headless", *daemon.PLAN_CLAUDE_FLAGS], ws, "proj.plan")
+assert spawns[-1] == (["claude", "-p", "/machines-at-work:plan headless",
+                       "--model", "claude-fable-5", *daemon.PLAN_CLAUDE_FLAGS], ws, "proj.plan"), \
+    "plan runs on PLAN_MODEL (judgment step gets the strongest model); unblock/retro stay on the CLI default"
 assert "--permission-mode" in spawns[-1][0] and "Bash" in " ".join(spawns[-1][0]), "headless plan must run non-interactively"
 assert api.reactions == [(10, "👀"), (10, "👌")] and api.sent[-1][1] == "🧠 planning…"
 assert daemon.process_message(mk(text=" PLAN ", mid=11), cfg, reg, api).startswith("plan started"), "case/whitespace-insensitive"
@@ -255,6 +258,11 @@ assert daemon.process_message(mk(text="relaunch", mid=40), cfg, reg, api).starts
 assert spawns[-1] == ([daemon.RELAUNCH, "proj"], os.path.dirname(daemon.RELAUNCH), "proj.relaunch")
 assert api.reactions == [(40, "👀"), (40, "👌")] and ls() == before, "relaunch writes no note"
 assert "relaunching proj" in api.sent[-1][1]
+# `relaunch force` is the phone's escape hatch from the build watermark: same
+# keyword, --force through to the script (a plain relaunch must NOT carry it, or
+# nothing is ever skipped).
+assert daemon.process_message(mk(text="Relaunch Force", mid=42), cfg, reg, api).startswith("relaunch started for proj")
+assert spawns[-1][0] == [daemon.RELAUNCH, "--force", "proj"], spawns[-1]
 # in General (no workspace) → refused, no spawn
 n = len(spawns)
 assert daemon.process_message(mk(text="relaunch", message_thread_id=77, mid=41), cfg, reg, api).startswith("skip: relaunch needs a project topic")
@@ -800,6 +808,29 @@ grep -q -- "--force-recreate" <<<"$out" && fail "a plain up must not force-recre
 out="$(BACKEND_RESET_VOLUMES=1 prev start_backend)"
 grep -q "docker compose down -v" <<<"$out" || fail "BACKEND_RESET_VOLUMES must drop volumes: $out"
 grep -q -- "--force-recreate" <<<"$out" || fail "a volume reset implies --force-recreate: $out"
+# The build watermark: a rebuild is skipped ONLY when the running preview already
+# serves exactly the checked-out commits. Every ingredient of that sentence is a
+# separate way to be wrong, so each gets a case — a false "current" serves stale
+# code, which is the failure this whole library exists to prevent.
+rm -f "$PREV/fe/dirt.txt"
+mkdir -p "$PREV/fe/build/web" "$PREV/state"; touch "$PREV/fe/build/web/index.html"
+echo "build/" > "$PREV/fe/.gitignore"          # as every flutter repo does
+git -C "$PREV/fe" add .gitignore && git -C "$PREV/fe" -c user.email=t@t -c user.name=t commit -qm ignore
+echo $$ > "$PREV/state/web-serve.pid"          # a live server (this test's own pid)
+prev preview_current && fail "no watermark yet — nothing can be current" || true
+prev write_watermark
+prev preview_current || fail "same commits + live server must count as current"
+out="$(prev cmd_up)"
+grep -q "skipping the rebuild" <<<"$out" || fail "a current preview must not be rebuilt: $out"
+grep -q "docker compose up" <<<"$out" && fail "a skipped up must not touch the backend: $out" || true
+echo drift > "$PREV/fe/dirt.txt"
+prev preview_current && fail "a dirty tree has no stable identity — never current" || true
+git -C "$PREV/fe" add -A && git -C "$PREV/fe" -c user.email=t@t -c user.name=t commit -qm drift
+prev preview_current && fail "a new commit must invalidate the watermark" || true
+prev write_watermark
+PREVIEW_FORCE_REBUILD=1 prev preview_current && fail "--force must override the watermark" || true
+echo 999999 > "$PREV/state/web-serve.pid"
+prev preview_current && fail "a dead server must rebuild however current the code is" || true
 echo "[smoke] preview-lib ok"
 
 echo "SMOKE OK"

@@ -125,8 +125,18 @@ When a 🧠/🚀/🩹 run finishes, the daemon posts the outcome back into the t
 (the earlier gap: a headless plan denied at a permission prompt died leaving only a 👌). The run's own
 `notify.sh` still delivers the substance (the task list); this is the completion signal on top.
 
-Every message you send gets a reaction: 👀 processing, then 👌 queued/started, or 😱 plus a reply
-saying what went wrong. (Telegram bots can only react from a fixed emoji set — no ✅/⚠️.)
+Every message you send gets a reaction: 👀 processing, then 👌 a command ran, ✍ it became an intent
+note, or 😱 plus a reply saying what went wrong. (Telegram bots can only react from a fixed emoji
+set — no ✅/⚠️.) 👌 and ✍ are deliberately different: a note gets no reply text (every note would
+otherwise be chat noise), so when both shared 👌 a message that quietly became a note looked exactly
+like a trigger that started.
+
+That is also why a **near-miss on a trigger is refused, not filed**: a very short message that
+contains a trigger emoji without being exactly one — a mistyped `I🚀` — gets 😱 and a reply telling
+you what to send. It is neither run nor queued. The daemon does not guess which trigger you meant
+(`no 🚀` is also five characters, and guessing wrong would spawn a build loop); one retap is cheaper
+than a wrong run, and cheaper than the garbage note the old fall-through left in the inbox for the
+next 🧠 to plan.
 
 Anything else in a project topic queues as an intent note for the next 🧠 — text as-is, voice
 transcribed (the transcript quoted back so a mis-hear is visible). **Images too**: a photo — or a

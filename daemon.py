@@ -44,15 +44,15 @@ Keyword `relaunch` (in a project topic) rebuilds just that project's preview sta
 (down → fresh up) via its <name>-dev.sh and posts the new frontend URL — the same
 relaunch the checkout flow runs, but on the current checkout rather than a chosen one.
 
-In the General topic (no registered workspace) a message that isn't `status` is
-treated as a free-form instruction (Decision #11): transcribe if voice, then run
-a one-shot `claude -p` in GENERAL_WORKSPACE and post its output back. This is the
-one interpretation path — everything else in this daemon stays deterministic.
+A topic with no registered workspace (General, or anything unregistered) has
+nowhere to drop a note, so a message there that isn't one of the box-level
+keywords above is refused with the list of commands that do work. This daemon has
+NO interpretation path: every message either matches a fixed token or becomes a
+note verbatim (Decision #11, reverted 2026-07-31).
 
 Config (all under $ORCH_HOME, default ~/.agent-orchestrator):
   telegram.env   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALLOWLIST (space/comma ids),
                  MAW_SCRIPTS (path to the machines-at-work plugin's scripts/, for 🚀),
-                 GENERAL_WORKSPACE (cwd for a General-topic `claude -p`),
                  PLAN_MODEL (model for the headless 🧠 plan run; default
                  claude-fable-5 — planning is the pipeline's highest-judgment,
                  lowest-token step, so it gets the strongest model; 🚀 build
@@ -203,8 +203,8 @@ HELP = (
     "as an intent note for the next plan; an image becomes a permanent resource "
     "the plan looks at (mockup, bug screenshot, sketch).\n"
     "\n"
-    "In the General topic:\n"
-    "• anything (text or voice) — answered by a one-shot claude run."
+    "In General (or any topic with no project): only the any-topic commands "
+    "above. There's no project there to take a note."
 )
 
 
@@ -353,50 +353,6 @@ def instruction_text(msg, api, cfg, thread_id):
     if "text" in msg:
         return "text", msg["text"]
     raise ValueError("only voice notes and text are supported")
-
-
-def run_general(prompt, cwd):
-    """One-shot `claude -p` in cwd; its stdout becomes the Telegram reply, trimmed
-    to Telegram's ~4096-char message ceiling. --dangerously-skip-permissions: no
-    TTY exists to answer permission prompts, and the allowlist (Decision #4) is
-    already the whole boundary for the loop.sh the daemon spawns on 🚀."""
-    out = subprocess.run(["claude", "-p", prompt, "--dangerously-skip-permissions"],
-                         cwd=cwd, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT)
-    if out.returncode != 0:
-        raise RuntimeError(out.stderr.strip() or f"claude exited {out.returncode}")
-    reply = out.stdout.strip() or "(claude returned no output)"
-    return reply if len(reply) <= 3900 else reply[:3900] + "\n…(truncated)"
-
-
-def general(msg, cfg, api, thread_id, react, fail):
-    """A General-topic message that isn't `status`: treat it as a free-form
-    instruction and answer it with a one-shot `claude -p` in GENERAL_WORKSPACE.
-    This is the daemon's only interpretation path — the deferred Phase-3 router
-    (Decision #10), scoped to General so registered topics stay note-drop.
-
-    Synchronous like status_report: a slow run briefly parks the poll loop —
-    acceptable for one user. The upgrade path (spawn detached, post back via the
-    bot API like a project's notify.sh) needs no new door. cwd is pinned to the
-    projects dir, not the daemon's home — a sensible default, not a sandbox."""
-    cwd = cfg.get("general_workspace")
-    if not cwd:
-        return fail("skip: GENERAL_WORKSPACE unset",
-                    "GENERAL_WORKSPACE isn't set in telegram.env — nothing to run claude against")
-    if not os.path.isdir(cwd):
-        return fail(f"skip: GENERAL_WORKSPACE {cwd} missing", f"GENERAL_WORKSPACE is missing: {cwd}")
-    try:
-        kind, text = instruction_text(msg, api, cfg, thread_id)
-    except ValueError as e:
-        return fail(f"skip: {e}", str(e))
-    try:
-        reply = run_general(text, cwd)
-    except subprocess.TimeoutExpired:
-        return fail(f"claude -p timed out after {CLAUDE_TIMEOUT}s", "that took too long and was stopped")
-    except Exception as e:
-        return fail(f"error: claude -p failed: {e}", f"claude failed: {e}")
-    api.send_message(cfg["chat_id"], reply, thread_id)
-    react("👌")
-    return f"general {kind} → claude -p ({len(text)} chars in, {len(reply)} out)"
 
 
 def pull_report(maw_scripts=None):
@@ -1249,9 +1205,14 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
                     "run `relaunch` inside a project topic — it rebuilds that project's preview.")
 
     if not entry:
-        # General (or any unregistered topic): not a command, so treat the
-        # message as a free-form instruction and answer it with `claude -p`.
-        return general(msg, cfg, api, thread_id, react, fail)
+        # General, or any topic with no registered workspace. There is nowhere to
+        # drop a note and nothing to run it against, so say so — the box-level
+        # commands above already ran, so anything reaching here is genuinely
+        # unroutable and silence would read as "queued".
+        return fail("skip: no workspace for this topic",
+                    "this topic has no project. Commands that work anywhere: "
+                    "status · pull-all · plugin · logmine · help. To drop a note "
+                    "for a project, send it in that project's topic.")
     workspace = entry["workspace"]
     if not os.path.isdir(workspace):
         return fail(f"skip: workspace {workspace} missing (registry drift)",
@@ -1325,7 +1286,6 @@ def build_config(env):
                  f"to {ENV_FILE}.")
     return {"token": token, "chat_id": env.get("TELEGRAM_CHAT_ID"),
             "allowlist": allowlist, "maw_scripts": env.get("MAW_SCRIPTS"),
-            "general_workspace": env.get("GENERAL_WORKSPACE"),
             "plan_model": env.get("PLAN_MODEL", "claude-fable-5")}
 
 

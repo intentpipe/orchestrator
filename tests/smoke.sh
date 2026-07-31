@@ -40,26 +40,32 @@ ls = lambda: sorted(os.listdir(inbox)) if os.path.isdir(inbox) else []
 # allowlist is the whole security model: a stranger gets no reply AND no reaction
 assert daemon.process_message({"from": {"id": 9}, "message_thread_id": 5, "text": "hi"}, cfg, reg, api).startswith("drop")
 assert not api.sent and not api.reactions, "stranger must get no reply and no reaction"
-# General / unregistered topic: a non-command message is a free-form instruction
-# answered by `claude -p`. With GENERAL_WORKSPACE unset it must fail loudly (config
-# error) — 👀 then 😱 + a reply naming the missing key — like MAW_SCRIPTS for 🚀.
-assert daemon.process_message(mk(text="x", message_thread_id=77), cfg, reg, api).startswith("skip: GENERAL_WORKSPACE unset")
-assert api.reactions == [(1, "👀"), (1, "😱")] and "GENERAL_WORKSPACE" in api.sent[-1][1]
-# GENERAL_WORKSPACE set: stub the one-shot run; the message text is piped to
-# claude -p in that cwd, its output posts back into General (thread 77), 👀→👌.
-gws = os.path.join(tmp, "gws"); os.makedirs(gws)
-gcfg = {**cfg, "general_workspace": gws}
-runs = []
-daemon.run_general = lambda prompt, cwd: runs.append((prompt, cwd)) or f"ran:{prompt}"
+# A topic with no registered workspace has nowhere to put a note and nothing to
+# run against, so a non-command message is refused — 👀 then 😱 — with the list of
+# commands that DO work there. It must never run anything: this daemon has no
+# interpretation path (Decision #11, reverted).
+assert not hasattr(daemon, "run_general") and not hasattr(daemon, "general"), \
+    "the free-form claude -p path must be gone, not merely unreachable"
+assert daemon.process_message(mk(text="x", message_thread_id=77), cfg, reg, api) == "skip: no workspace for this topic"
+assert api.reactions == [(1, "👀"), (1, "😱")], api.reactions
+assert "no project" in api.sent[-1][1] and "status" in api.sent[-1][1], api.sent
+assert api.sent[-1][0] == 77, "the refusal replies in the topic it came from"
+# Voice there is refused the same way — no transcription, no spawn.
+called = []
+daemon.transcribe = lambda p: called.append(p) or "should not be reached"
 api = FakeAPI()
-assert daemon.process_message(mk(text="show branches with open PRs", message_thread_id=77, mid=20), gcfg, reg, api).startswith("general text → claude -p")
-assert runs[-1] == ("show branches with open PRs", gws), runs
-assert api.sent[-1] == (77, "ran:show branches with open PRs") and api.reactions == [(20, "👀"), (20, "👌")]
-# voice in General: transcribe (stubbed) → quote it back → claude -p on the transcript
-daemon.transcribe = lambda p: "update all projects"
+assert daemon.process_message(mk(voice={"file_id": "v"}, message_thread_id=77, mid=21), cfg, reg, api) \
+    == "skip: no workspace for this topic"
+assert not called, "an unroutable message must not even be transcribed"
+# The box-level commands still work there — removing the workspace path must not
+# take `status`/`logmine`/`help` with it, since General is where they're used.
 api = FakeAPI()
-assert daemon.process_message(mk(voice={"file_id": "v"}, message_thread_id=77, mid=21), gcfg, reg, api).startswith("general voice → claude -p")
-assert api.sent[0] == (77, "🎙 > update all projects") and runs[-1][0] == "update all projects"
+daemon.status_report = lambda ws=None: f"report(ws={ws})"
+assert daemon.process_message(mk(text="status", message_thread_id=77, mid=22), cfg, reg, api) == "status report sent (all)"
+assert api.sent[-1] == (77, "report(ws=None)") and api.reactions[-1] == (22, "👌")
+api = FakeAPI()
+assert daemon.process_message(mk(text="help", message_thread_id=77, mid=23), cfg, reg, api) == "help sent"
+assert "logmine" in api.sent[-1][1] and "one-shot claude" not in api.sent[-1][1], "help must not advertise a removed feature"
 # text → RAW drop at updates/.inbox/<epoch>-<msgid>.md, 👀→👌, NO reply text
 api = FakeAPI()
 assert daemon.process_message(mk(text="add dark mode", date=1700000001, mid=7), cfg, reg, api).startswith("queued text")

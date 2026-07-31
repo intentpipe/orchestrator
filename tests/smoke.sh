@@ -144,6 +144,9 @@ assert len(spawns) == n and api.reactions[-1] == (14, "😱") and "already runni
 # MAW_SCRIPTS unset → 🚀 fails with a config error, never a silent no-op
 assert daemon.process_message(mk(text="🚀", mid=15), {**cfg, "maw_scripts": None}, reg, api).startswith("skip: MAW_SCRIPTS")
 assert "MAW_SCRIPTS" in api.sent[-1][1]
+# Release it: that pidfile was this check's fixture, and it now holds the whole
+# project (project_busy), which would make every later dispatch here "busy".
+os.remove(os.path.join(daemon.RUN_DIR, "proj.loop.pid"))
 
 # `status` keyword: short-circuits routing (writes no note), replies into its
 # topic, and is workspace-scoped by topic. Stub status_report to capture its arg.
@@ -320,6 +323,132 @@ assert any("applying" in t for _, t in api.sent), api.sent
 daemon.spawn_detached = lambda cmd, cwd, base, track=None: spawns.append((cmd, cwd, base)) or 4242
 PY
 echo "[smoke] daemon process_message ok"
+
+# --- The project mutex: plan/loop/unblock/retro/checkout/relaunch all mutate one
+# project's task queue, state repo, or checked-out branches, so any one of them
+# running must block the others — the per-(project, action) pidfile alone let a 🚀
+# start against a queue the planner was still writing.
+python3 - "$ORCH" "$TMP" <<'PY' || fail "project mutex checks failed"
+import os, sys
+orch, tmp = sys.argv[1], sys.argv[2]
+sys.path.insert(0, orch)
+import daemon
+daemon.RUN_DIR = os.path.join(tmp, "mutexrun"); os.makedirs(daemon.RUN_DIR)
+ws = os.path.join(tmp, "mws", "scaffold"); os.makedirs(ws)
+cfg = {"chat_id": "-100", "allowlist": {"42"}, "maw_scripts": "/opt/maw/scripts"}
+reg = {"5": {"name": "proj", "workspace": ws}}
+class FakeAPI:
+    def __init__(self): self.sent = []; self.reactions = []; self._mid = 0
+    def send_message(self, chat, text, thread_id=None):
+        self.sent.append((thread_id, text)); self._mid += 1
+        return {"result": {"message_id": self._mid}}
+    def set_reaction(self, chat, mid, emoji): self.reactions.append((mid, emoji))
+mk = lambda **kw: {"from": {"id": 42}, "chat": {"id": -100}, "message_id": kw.pop("mid", 1),
+                   "date": 1700000000, "message_thread_id": 5, **kw}
+spawns = []
+daemon.spawn_detached = lambda cmd, cwd, base, track=None: spawns.append(base) or 4242
+daemon.sync_plugin = lambda cfg: None
+
+# A live plan pidfile (this very process — guaranteed alive and not a zombie)
+# must turn a 🚀 away, naming the run that holds the project.
+open(os.path.join(daemon.RUN_DIR, "proj.plan.pid"), "w").write(str(os.getpid()))
+api = FakeAPI()
+out = daemon.process_message(mk(text="🚀"), cfg, reg, api)
+assert out == "skip: plan already running for proj", out
+assert not spawns, "🚀 must not spawn while plan holds the project"
+assert api.reactions[-1] == (1, "😱") and "plan is still running" in api.sent[-1][1], api.sent
+# …and `relaunch`, which would swap branches under that same plan.
+api = FakeAPI()
+out = daemon.process_message(mk(text="relaunch", mid=2), cfg, reg, api)
+assert out == "skip: plan already running for proj", out
+assert not spawns, spawns
+# A run never blocks itself: with only its OWN pidfile alive, plan proceeds.
+os.rename(os.path.join(daemon.RUN_DIR, "proj.plan.pid"),
+          os.path.join(daemon.RUN_DIR, "proj.loop.pid"))
+assert daemon.project_busy("proj", exclude="proj.loop") is None, "own base must be excluded"
+assert daemon.project_busy("proj") == "loop"
+# A stale pidfile (dead pid) is not a lock — the fleet must not wedge after a crash.
+open(os.path.join(daemon.RUN_DIR, "proj.loop.pid"), "w").write("999999999")
+assert daemon.project_busy("proj") is None, "a dead pid must not hold the project"
+api = FakeAPI()
+assert daemon.process_message(mk(text="🚀", mid=3), cfg, reg, api).startswith("loop started")
+assert spawns == ["proj.loop"], spawns
+# Another project is unaffected — the mutex is per-project, not global.
+open(os.path.join(daemon.RUN_DIR, "other.plan.pid"), "w").write(str(os.getpid()))
+assert daemon.project_busy("proj") is None, "another project's run must not block this one"
+PY
+echo "[smoke] project mutex ok"
+
+# --- Orphan sweep: leaked flutter_tester workers survive daemon restarts and carry
+# the box's memory peak. Age is the discriminator (a live suite runs for minutes),
+# and the match is on the exact comm name so nothing else is ever a candidate.
+python3 - "$ORCH" "$TMP" <<'PY' || fail "orphan sweep checks failed"
+import os, subprocess, sys, time
+orch, tmp = sys.argv[1], sys.argv[2]
+sys.path.insert(0, orch)
+import daemon
+
+# Hermetic fixture: a child that renames its own comm via prctl(PR_SET_NAME) to a
+# name only this test uses. The sweep is exercised against a real process in real
+# /proc without the suite depending on — or signalling — anything else on the box.
+FAKE = ("smoke_tester",)
+victim = subprocess.Popen([sys.executable, "-c",
+    "import ctypes, time\n"
+    "ctypes.CDLL('libc.so.6').prctl(15, b'smoke_tester', 0, 0, 0)\n"
+    "time.sleep(300)"])
+bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+time.sleep(0.3)   # let both appear in /proc with a readable comm
+try:
+    # Younger than max_age → spared. This is what protects a LIVE suite: a daemon
+    # restart mid-verify must not kill the workers that verify is still using.
+    assert daemon.sweep_orphans(max_age=10_000, comms=FAKE) == [], "a young worker must be spared"
+    assert victim.poll() is None
+    # Older than max_age → reaped, and reported so the journal (and logmine) see it.
+    killed = daemon.sweep_orphans(max_age=0, comms=FAKE)
+    assert [p for p, _, _ in killed] == [victim.pid], (killed, victim.pid)
+    assert killed[0][1] == "smoke_tester" and isinstance(killed[0][2], int), killed
+    victim.wait(timeout=10)
+    assert victim.poll() is not None, "the orphan must actually be dead"
+    # Only a matching comm is ever signalled — everything else on the box is
+    # structurally out of scope, not spared by a special case.
+    assert bystander.poll() is None, "a non-matching process must never be touched"
+    assert "flutter_tester" in daemon.ORPHAN_COMMS and daemon.ORPHAN_MAX_AGE >= 3600
+    # A broken /proc must never take the poll loop down with it.
+    real = daemon._boot_time
+    daemon._boot_time = lambda: (_ for _ in ()).throw(ValueError("boom"))
+    assert daemon.sweep_orphans(comms=FAKE) == [], "a sweep failure must degrade to a no-op"
+    daemon._boot_time = real
+finally:
+    for p in (victim, bystander):
+        p.kill(); p.wait()
+
+# getUpdates backoff: doubles per failure, capped, and Telegram's own retry_after wins.
+import io, json as _json, urllib.error
+assert daemon.POLL_BACKOFF_MIN == 5 and daemon.POLL_BACKOFF_MAX == 120
+b = daemon.POLL_BACKOFF_MIN
+seq = []
+for _ in range(6):
+    seq.append(b); b = min(b * 2, daemon.POLL_BACKOFF_MAX)
+assert seq == [5, 10, 20, 40, 80, 120], seq
+assert daemon._retry_after(OSError("read timed out")) is None, "only HTTP errors carry retry_after"
+body = _json.dumps({"parameters": {"retry_after": 37}}).encode()
+e429 = urllib.error.HTTPError("u", 429, "Too Many Requests", {}, io.BytesIO(body))
+assert daemon._retry_after(e429) == 37
+# header fallback when the body has none, and a hostile value is capped
+e_hdr = urllib.error.HTTPError("u", 429, "x", {"Retry-After": "12"}, io.BytesIO(b"{}"))
+assert daemon._retry_after(e_hdr) == 12
+e_big = urllib.error.HTTPError("u", 429, "x", {"Retry-After": "99999"}, io.BytesIO(b"{}"))
+assert daemon._retry_after(e_big) == daemon.POLL_BACKOFF_MAX
+
+# A failed child's log tail reaches the JOURNAL, not just Telegram — logmine reads
+# the journal, so a bare "FAILED (rc=1)" is a defect it can never diagnose.
+logp = os.path.join(tmp, "child.log")
+open(logp, "w").write("\n".join(f"line {i}" for i in range(60)))
+tail, rejected = daemon._log_report(logp, 20)
+assert tail.splitlines()[0] == "line 40" and len(tail.splitlines()) == 20, tail
+assert daemon._log_report(logp)[0].endswith("line 59")   # byte-budget form unchanged
+PY
+echo "[smoke] orphan sweep + backoff ok"
 
 # --- status.py builds a report from a stub registry + ports.json, and scopes to
 # one workspace when asked. No git repos / no live ports needed to exercise it.

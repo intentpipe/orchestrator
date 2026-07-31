@@ -10,7 +10,7 @@ resolve the message's forum topic to a workspace via the registry → then eithe
 dispatch a trigger token (Decision #10: 🧠/`plan` → headless /machines-at-work:plan,
 🚀/`build-all` → detached loop.sh, 🩹/`unblock` → headless /machines-at-work:unblock,
 📋/`retro` → headless /machines-at-work:retro, whose new reports post back
-react-to-apply; exact match only) or transcribe voice / take
+react-to-apply, 🧹/`cleanup` → headless /machines-at-work:cleanup; exact match only) or transcribe voice / take
 text and drop the RAW message into <workspace>/updates/.inbox/<epoch>-<msgid>.md
 — machines-at-work's inbound.sh contract; the plugin names and formats notes,
 never the daemon. An image (photo, or an image/* document) is intent too: it is
@@ -157,7 +157,8 @@ POLL_BACKOFF_MAX = 120
 # Exact-match trigger tokens (Decision #10). Matching is on the stripped,
 # case-folded message text — "plan" inside a sentence never fires.
 TRIGGERS = {"🧠": "plan", "plan": "plan", "🚀": "loop", "build-all": "loop",
-            "🩹": "unblock", "unblock": "unblock", "📋": "retro", "retro": "retro"}
+            "🩹": "unblock", "unblock": "unblock", "📋": "retro", "retro": "retro",
+            "🧹": "cleanup", "cleanup": "cleanup"}
 
 # Emoji that mean "run something" — the TRIGGERS ones plus 🔌, which is a
 # keyword short-circuit rather than a table entry. A message that is *almost*
@@ -215,6 +216,9 @@ HELP = (
     "• 📋 or retro — mine this project's finished tasks for pipeline weaknesses "
     "(headless /machines-at-work:retro); each proposal posts back — react to one "
     "to apply it as a machines-at-work PR.\n"
+    "• 🧹 or cleanup — sweep the repos for dead/duplicated code (headless "
+    "/machines-at-work:cleanup, read-only); findings land as an updates/ note — "
+    "🧠 to plan them.\n"
     "• checkout — post the checkout options (default branch + each open-PR "
     "state); react to one to check ALL repos out, rebuild with the backend "
     "volumes reset, and get the URLs with the branch behind each.\n"
@@ -930,7 +934,7 @@ def pid_alive(pidfile):
 
 # Every run that mutates a project: its task queue and state repo (plan/loop/
 # unblock/retro) or the branches its repos are checked out on (checkout/relaunch).
-PROJECT_ACTIONS = ("plan", "loop", "unblock", "retro", "checkout", "relaunch")
+PROJECT_ACTIONS = ("plan", "loop", "unblock", "retro", "cleanup", "checkout", "relaunch")
 
 
 def project_busy(name, exclude=None):
@@ -1112,6 +1116,9 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
     elif action == "retro":
         cmd, ack = ["claude", "-p", "/machines-at-work:retro headless", *PLAN_CLAUDE_FLAGS], \
                    "📋 retro — mining finished tasks; proposals will post back…"
+    elif action == "cleanup":
+        cmd, ack = ["claude", "-p", "/machines-at-work:cleanup headless", *PLAN_CLAUDE_FLAGS], \
+                   "🧹 sweeping for dead/duplicated code — findings land as an updates/ note…"
     else:
         # Plan is the one dispatch that gets an explicit model: it is judgment
         # over intent (decompose, feature boundaries, Decision: gates) and its

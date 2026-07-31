@@ -134,6 +134,17 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     because there is no TTY to answer prompts — the pinned cwd is a default dir, **not** a sandbox (the agent can
     read any path the daemon user can), so the allowlist remains the whole boundary, as #4 always intended.
 
+    **REVERTED 2026-07-31.** It never ran once. `GENERAL_WORKSPACE` was never set, so all nine General-topic
+    messages in the eleven days it existed hit the config error and nothing else — the feature's entire
+    production history is its own failure path. The escape hatch named in (a) turned out to be the whole
+    answer: cross-project work went through SSH / Claude Code directly, because a one-shot with no session
+    is the wrong shape for anything open-ended enough to need judgment. Removing it also restores the
+    property #10 wanted and #4 depends on: **every message either matches a fixed token or becomes a note
+    verbatim**, so the daemon has no interpretation path and arbitrary agent execution is no longer
+    reachable from a Telegram message. A topic with no workspace now refuses the message and lists the
+    keywords that work there. The box-level keywords (`status`, `pull-all`, `plugin`, `logmine`, `help`)
+    are unaffected — they short-circuit before the workspace lookup, which is why General stays useful.
+
 12. **`pull-all` is a deterministic fleet command, not a `claude -p` ask (2026-07-20).** *Objection:* if
     General already routes free-form messages to `claude -p`, why not just say "pull everything" there? Because
     pulling a **known, enumerable** set of repos is mechanics, not judgment, and — unlike a report — it can

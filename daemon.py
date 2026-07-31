@@ -62,10 +62,12 @@ Run:  server-orchestrator/daemon.py            # long-poll forever (systemd unit
 """
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -121,6 +123,29 @@ INSTALLED_PLUGINS = os.path.expanduser("~/.claude/plugins/installed_plugins.json
 # Ceiling for a General `claude -p` run. It parks the poll loop meanwhile (same
 # synchronous-subprocess shape as status_report), so keep it bounded.
 CLAUDE_TIMEOUT = 300
+
+# Orphaned test workers. `flutter test` leaks flutter_tester engines whose parent
+# is long gone; the plugin's verify.sh reaps the ones IT spawns (its own process
+# group), but nothing collects a worker leaked by an interactive session, a killed
+# loop, or a run that predates that fix. They survive every daemon restart —
+# KillMode=process means systemd deliberately spares the cgroup — so they
+# accumulate for days and carry the box's memory/swap peak.
+#
+# Age, not "predates the unit start", is the discriminator: a restart during an
+# in-flight loop leaves that loop's LIVE workers older than the unit, and killing
+# them would fail a running verify. No legitimate flutter_tester outlives a test
+# suite (minutes), so anything past this age is garbage by definition. Matched on
+# the exact comm name — the preview servers (python3 http.server) and every other
+# long-lived process are structurally out of scope, not spared by a special case.
+ORPHAN_COMMS = ("flutter_tester",)
+ORPHAN_MAX_AGE = int(os.environ.get("ORPHAN_MAX_AGE", 2 * 3600))
+ORPHAN_SWEEP_EVERY = int(os.environ.get("ORPHAN_SWEEP_EVERY", 600))
+
+# getUpdates retry window: start at 5s, double per consecutive failure, cap at 2
+# minutes, reset on the first good poll. A 429 that carries retry_after overrides
+# both — Telegram saying "wait N" is better information than any local guess.
+POLL_BACKOFF_MIN = 5
+POLL_BACKOFF_MAX = 120
 
 # Exact-match trigger tokens (Decision #10). Matching is on the stripped,
 # case-folded message text — "plan" inside a sentence never fires.
@@ -206,6 +231,26 @@ def write_offset(n):
     with open(tmp, "w") as f:
         f.write(str(n))
     os.replace(tmp, OFFSET_FILE)  # atomic: a crash never leaves a torn offset
+
+
+def _retry_after(exc):
+    """Seconds Telegram asked us to wait, or None. A 429 carries the delay twice —
+    `parameters.retry_after` in the JSON body and a Retry-After header — and which
+    one is present varies, so read the body first and fall back to the header.
+    Capped: a bad or hostile value must not park the control plane for an hour."""
+    if not isinstance(exc, urllib.error.HTTPError):
+        return None
+    after = None
+    try:
+        after = json.loads(exc.read().decode()).get("parameters", {}).get("retry_after")
+    except Exception:
+        pass
+    if after is None:
+        after = (exc.headers or {}).get("Retry-After")
+    try:
+        return max(1, min(int(after), POLL_BACKOFF_MAX))
+    except (TypeError, ValueError):
+        return None
 
 
 class TelegramAPI:
@@ -568,6 +613,29 @@ def _slug(s):
     return (out or "change")[:40]
 
 
+def _open_logmine_prs(cfg):
+    """Open PRs on logmine/* branches in both target repos, as "#N title" lines.
+
+    logmine implements a proposal on a branch and opens a PR — and the fix only
+    reaches the running system when that PR MERGES. Until then the flaw is still
+    in the logs, so the next run re-detects it and proposes it again: three runs
+    burned full Opus sessions re-implementing fixes that were already sitting in
+    an open PR. Feeding the open ones back into the analysis closes that loop."""
+    out = []
+    for repo in ("server-orchestrator", "machines-at-work"):
+        try:
+            r = subprocess.run(
+                ["gh", "pr", "list", "-R", f"all-machines-at-work/{repo}", "--state", "open",
+                 "--json", "number,title,headRefName"],
+                capture_output=True, text=True, timeout=30)
+            for pr in json.loads(r.stdout or "[]"):
+                if pr.get("headRefName", "").startswith("logmine/"):
+                    out.append(f"- {repo}#{pr['number']}: {pr['title']}")
+        except Exception:
+            continue   # no gh, no network, no auth: analysis proceeds without the list
+    return out
+
+
 def run_logmine(cfg, api, thread_id, react, fail):
     """`logmine`: read the orchestrator logs not seen since the last run, ask claude
     for tooling improvements, and post each as its own message the user can
@@ -583,7 +651,14 @@ def run_logmine(cfg, api, thread_id, react, fail):
         react("👌")
         return "logmine: no new logs"
     api.send_message(cfg["chat_id"], "🔍 logmine: reading new logs…", thread_id)
-    prompt = open(LOGMINE_ANALYZE).read() + "\n\n=== LOGS ===\n" + logs
+    prompt = open(LOGMINE_ANALYZE).read()
+    pending = _open_logmine_prs(cfg)
+    if pending:
+        prompt += ("\n\n=== ALREADY PROPOSED (open PRs) ===\n"
+                   "These fixes are implemented and waiting to merge. Their symptoms are\n"
+                   "STILL IN THE LOGS BELOW — that is expected, not new evidence. Do not\n"
+                   "propose any of them again:\n" + "\n".join(pending))
+    prompt += "\n\n=== LOGS ===\n" + logs
     # Feed the prompt on stdin, not as an argv string: the collected logs run to
     # hundreds of KB and a single argument is capped at MAX_ARG_STRLEN (128 KiB),
     # so `claude -p <prompt>` dies with OSError "argument list too long". stdin
@@ -607,6 +682,13 @@ def run_logmine(cfg, api, thread_id, react, fail):
                        capture_output=True, text=True, timeout=90)
     except Exception:
         pass
+    # Re-surface what's still unmerged every run, proposals or not: an implemented
+    # fix that never lands is indistinguishable from no fix at all, and this is the
+    # only place the human is reminded that merging is the last step.
+    if pending:
+        api.send_message(cfg["chat_id"],
+                         "⏳ logmine fixes implemented but NOT merged — they only take "
+                         "effect once you merge:\n" + "\n".join(pending), thread_id)
     if not proposals:
         api.send_message(cfg["chat_id"], "🔍 logmine: nothing worth changing in the new logs.", thread_id)
         react("👌")
@@ -778,6 +860,15 @@ def process_reaction(r, cfg, api):
     if pid_alive(base):
         api.send_message(cfg["chat_id"], f"⏳ {offer['name']} is already building — hang on.", offer["topic"])
         return f"skip: checkout build already running for {offer['name']}"
+    # A checkout switches every repo's branch. Doing that under a running loop or
+    # plan would move the ground beneath it mid-task, so the project mutex applies
+    # here too — reacting to a stale offer must not hijack a live build.
+    busy = project_busy(offer["name"], f"{offer['name']}.checkout")
+    if busy:
+        api.send_message(cfg["chat_id"],
+                         f"⏳ {busy} is still running for {offer['name']} — react again once it's done.",
+                         offer["topic"])
+        return f"skip: {busy} already running for {offer['name']}"
     pid = build_checkout(offer)
     api.send_message(cfg["chat_id"],
                      f"👌 checking out [{offer['label']}] and rebuilding {offer['name']} "
@@ -842,6 +933,89 @@ def pid_alive(pidfile):
         return False  # no such process: stale pidfile, proceed
 
 
+# Every run that mutates a project: its task queue and state repo (plan/loop/
+# unblock/retro) or the branches its repos are checked out on (checkout/relaunch).
+PROJECT_ACTIONS = ("plan", "loop", "unblock", "retro", "checkout", "relaunch")
+
+
+def project_busy(name, exclude=None):
+    """The action already running for this project, or None.
+
+    The per-(project, action) pidfile only stops a SECOND plan; it happily let a
+    🚀 start while the planner was still writing tasks/ and committing the state
+    repo, and the loop then ran against a half-written queue (journal 2026-07-25T
+    21:49:45/46). These runs share one project's files, so the lock they need is
+    per-PROJECT — one mutex, not one per verb. `exclude` is the caller's own base,
+    so a relaunch doesn't find itself."""
+    for action in PROJECT_ACTIONS:
+        base = f"{name}.{action}"
+        if base != exclude and pid_alive(os.path.join(RUN_DIR, base + ".pid")):
+            return action
+    return None
+
+
+def _proc_age(pid, clk_tck, boot):
+    """Seconds since `pid` started, from /proc — or None if it's gone. Reads
+    starttime (field 22, in clock ticks since boot) rather than shelling out to
+    ps: the sweep runs on every poll cycle's schedule and must stay cheap."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().rsplit(") ", 1)[1].split()
+        return time.time() - (boot + int(fields[19]) / clk_tck)
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _boot_time():
+    with open("/proc/stat") as f:
+        for line in f:
+            if line.startswith("btime "):
+                return int(line.split()[1])
+    raise ValueError("no btime in /proc/stat")
+
+
+def sweep_orphans(max_age=None, comms=ORPHAN_COMMS):
+    """TERM (then KILL) leaked test workers older than max_age. Returns the list of
+    (pid, comm, age) it killed, for the caller to log — a silent reap would be
+    invisible to logmine, which reads this journal to spot exactly this kind of
+    leak. Never raises: a sweep failure must not touch the poll loop."""
+    max_age = ORPHAN_MAX_AGE if max_age is None else max_age
+    killed = []
+    try:
+        clk_tck, boot, uid = os.sysconf("SC_CLK_TCK"), _boot_time(), os.getuid()
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    comm = f.read().strip()
+                if comm not in comms:
+                    continue
+                if os.stat(f"/proc/{pid}").st_uid != uid:   # not ours to reap
+                    continue
+            except OSError:
+                continue
+            age = _proc_age(pid, clk_tck, boot)
+            if age is None or age < max_age:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                continue
+            killed.append((pid, comm, int(age)))
+        if killed:
+            time.sleep(2)   # a moment to exit on TERM before the hammer
+            for pid, _, _ in killed:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass   # already gone — TERM was enough
+    except Exception as e:
+        log(f"orphan sweep error (non-fatal): {e}")
+    return killed
+
+
 # In-flight detached runs the daemon reaps + reports on: [{popen, name, action,
 # topic, log}]. Fire-and-forget with only a 👌 hid failures — a run rejected or
 # crashed before it could notify.sh left the user staring at "planning…" forever.
@@ -871,17 +1045,21 @@ def spawn_detached(cmd, cwd, base, track=None):
     return p.pid
 
 
-def _log_report(path):
+def _log_report(path, lines=None):
     """(tail, rejected) for a finished run's log — tail for the reply, rejected
-    True if a permission denial appears anywhere in it."""
+    True if a permission denial appears anywhere in it. `lines` caps the tail to
+    that many final lines (for the journal) instead of Telegram's byte budget."""
     try:
         with open(path) as f:
             data = f.read()
     except OSError:
         return "(log unavailable)", False
     rejected = any(m in data.lower() for m in REJECT_MARKERS)
-    tail = data[-1500:].strip() or "(no output)"
-    return tail, rejected
+    if lines:
+        tail = "\n".join(data.splitlines()[-lines:]).strip()
+    else:
+        tail = data[-1500:].strip()
+    return tail or "(no output)", rejected
 
 
 def reap_jobs(cfg, api):
@@ -900,7 +1078,14 @@ def reap_jobs(cfg, api):
             why = f"exited with code {rc}" if rc != 0 else "was blocked — a tool or command was rejected"
             api.send_message(cfg["chat_id"],
                              f"😱 {j['action']} for {j['name']} {why}:\n\n{tail}", j.get("topic"))
-            log(f"{j['action']} for {j['name']} FAILED (rc={rc}, rejected={rejected})")
+            # The tail goes to the JOURNAL too, not just Telegram. A bare
+            # "FAILED (rc=1)" is unreadable months later and — more to the point —
+            # logmine reads this journal, so a failure with no context is a failure
+            # it can never propose a fix for. Indented so the multi-line tail stays
+            # visually attached to its "[daemon] … FAILED" line.
+            detail = "\n".join("    " + ln for ln in _log_report(j["log"], 20)[0].splitlines())
+            log(f"{j['action']} for {j['name']} FAILED (rc={rc}, rejected={rejected}); "
+                f"last lines of {os.path.basename(j['log'])}:\n{detail}")
         else:
             done = f"✅ {j['action']} for {j['name']} finished."
             if j.get("report_tail"):   # e.g. logmine implement — surface the PR URL
@@ -937,6 +1122,10 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
     base = f"{name}.{action}"
     if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
         return fail(f"skip: {action} already running for {name}", f"{action} is already running")
+    busy = project_busy(name, base)
+    if busy:
+        return fail(f"skip: {busy} already running for {name}",
+                    f"{busy} is still running for {name} — wait for it to finish, then retry")
     # The agents declare `memory: project`, which claude resolves from cwd. The
     # registry's workspace is <root>/machines-at-work, so spawning there gave
     # every headless run a different memory store than an interactive session at
@@ -1066,6 +1255,10 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
         base = f"{name}.relaunch"
         if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
             return fail(f"skip: relaunch already running for {name}", "a relaunch is already running")
+        busy = project_busy(name, base)
+        if busy:   # a rebuild mid-build would swap branches under a running loop
+            return fail(f"skip: {busy} already running for {name}",
+                        f"{busy} is still running for {name} — wait for it to finish, then retry")
         try:
             pid = spawn_detached([RELAUNCH, name], os.path.dirname(RELAUNCH), base)
         except OSError as e:
@@ -1119,12 +1312,26 @@ def run(once=False):
     api = TelegramAPI(cfg["token"])
     log(f"up · {len(load_registry())} topic(s) registered · allowlist {sorted(cfg['allowlist'])}")
     offset = read_offset()
+    backoff = POLL_BACKOFF_MIN
+    # Sweep once at startup — the leak systemd reports as "Found left-over process
+    # … in control group while starting unit" is exactly what a restart inherits —
+    # then periodically, because workers also leak while the daemon stays up.
+    last_sweep = time.time()
+    for pid, comm, age in sweep_orphans():
+        log(f"reaped orphan {comm} pid {pid} at startup (idle {age // 3600}h{age % 3600 // 60}m)")
     while True:
         try:
             updates = api.get_updates(offset)
+            backoff = POLL_BACKOFF_MIN   # a good poll clears the penalty
         except Exception as e:  # tolerant like notify.sh — a dead network never kills the daemon
-            log(f"getUpdates error: {e}; retrying in 5s")
-            time.sleep(5)
+            # Retrying a 429 at a fixed 5s hammers an endpoint that just asked us to
+            # stop, which prolongs the throttle and keeps the control plane deaf to
+            # inbound commands. Honour Telegram's own retry_after when it sends one,
+            # otherwise double the wait up to POLL_BACKOFF_MAX.
+            wait = _retry_after(e) or backoff
+            log(f"getUpdates error: {e}; retrying in {wait}s")
+            time.sleep(wait)
+            backoff = min(backoff * 2, POLL_BACKOFF_MAX)
             continue
         for u in updates:
             offset = u["update_id"] + 1
@@ -1146,6 +1353,10 @@ def run(once=False):
             reap_jobs(cfg, api)
         except Exception as e:
             log(f"reap_jobs error: {e}")
+        if time.time() - last_sweep >= ORPHAN_SWEEP_EVERY:
+            last_sweep = time.time()
+            for pid, comm, age in sweep_orphans():
+                log(f"reaped orphan {comm} pid {pid} (idle {age // 3600}h{age % 3600 // 60}m)")
         if once:
             return
 

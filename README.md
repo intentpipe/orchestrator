@@ -232,8 +232,17 @@ to a PR's branches (that path resets the backend volumes; this one deliberately 
 so a `relaunch` never throws away the dev data you were looking at).
 
 Runs detached (`relaunch <name>`; the rebuild takes minutes) and speaks for itself in the
-topic when it's done. The script also runs from a shell: `relaunch [--reset] [project]`,
-no argument = every registered project.
+topic when it's done. The script also runs from a shell: `relaunch [--reset] [--force]
+[project]`, no argument = every registered project.
+
+A rebuild that would change nothing is skipped: each successful build records the
+repo/branch/sha it served (`<state-dir>/build-watermark`), and a later relaunch or
+checkout that finds every repo on those same commits — with the static server and the
+containers still alive — just re-posts the URLs. That is what keeps a `checkout` onto the
+branch a relaunch already built from spending four minutes and a `down -v` on an identical
+result. Anything else (a new commit, a dirty tree, a dead server, a stopped backend)
+rebuilds as before; `relaunch force` in the topic (or `relaunch --force` in a shell)
+rebuilds unconditionally.
 
 ## Keyword: `help`
 

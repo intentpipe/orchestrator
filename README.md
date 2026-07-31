@@ -302,30 +302,17 @@ freshness** below), made on-demand and given a report. The daemon passes its own
 `--source` (from `MAW_SCRIPTS`) so the keyword and `sync_plugin` can't resolve
 different source trees.
 
-## General topic: free-form → `claude -p`
+## Topics with no project
 
-Registered topics map to a project; the **General** topic doesn't. A message there that isn't `status`
-is treated as a free-form instruction — the daemon's one interpretation path (everything else is
-deterministic). It transcribes voice, then runs a **one-shot** `claude -p` in `GENERAL_WORKSPACE` and
-posts the output back into General. Good for cross-project asks:
+Registered topics map to a project; **General** and anything unregistered don't. A message there
+that isn't one of the any-topic keywords (`status`, `pull-all`, `plugin`, `logmine`, `help`) is
+refused with 😱 and the list of commands that do work — there's no project to take a note for.
 
-> *"update all the projects to the latest main"* · *"write a script that shows the branches with open PRs"*
-
-```
-echo 'GENERAL_WORKSPACE=/home/you/projects' >> ~/.agent-orchestrator/telegram.env
-```
-
-If `GENERAL_WORKSPACE` is unset it fails loudly (😱 + a reply) rather than running claude against the
-daemon's home. Reaction lifecycle is the same as everywhere: 👀 → 👌, or 😱 + reason.
-
-**Deliberately bounded** (see Decision #11):
-- **One-shot, not a session.** The daemon is stateless across messages, so this is *fire a task, get one
-  result back* — not a conversation. If you find yourself wanting to iterate on an authored script over
-  several messages, that's the signal to SSH in / open Claude Code directly, not to bend this into a REPL.
-- **Synchronous.** A long run briefly parks the poll loop (same shape as `status`); fine for a single user.
-- **`--dangerously-skip-permissions`**, run in a pinned cwd. The cwd is a sensible default dir, **not** a
-  sandbox — the allowlist stays the whole security model, exactly as it is for the 🚀 loop.
-- **General only.** Registered project topics still note-drop / trigger; this never fires there.
+General is still where the box-level keywords are meant to be used; only the free-form
+`claude -p` path is gone (Decision #11, reverted 2026-07-31: it never ran successfully once —
+`GENERAL_WORKSPACE` was never set, so every message in eleven days hit the config error).
+Cross-project work goes through SSH / Claude Code directly, which is what the escape hatch in
+that decision already pointed at.
 
 ## `system-scripts/`
 

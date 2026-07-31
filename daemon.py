@@ -52,7 +52,11 @@ one interpretation path — everything else in this daemon stays deterministic.
 Config (all under $ORCH_HOME, default ~/.agent-orchestrator):
   telegram.env   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALLOWLIST (space/comma ids),
                  MAW_SCRIPTS (path to the machines-at-work plugin's scripts/, for 🚀),
-                 GENERAL_WORKSPACE (cwd for a General-topic `claude -p`)
+                 GENERAL_WORKSPACE (cwd for a General-topic `claude -p`),
+                 PLAN_MODEL (model for the headless 🧠 plan run; default
+                 claude-fable-5 — planning is the pipeline's highest-judgment,
+                 lowest-token step, so it gets the strongest model; 🚀 build
+                 cost lives in loop.sh's own MODEL knob, default opus)
   registry.json  {"<thread_id>": {"name": ..., "workspace": "/abs/scaffold-dir"}}
   offset         last processed update_id (persisted, so restarts don't replay)
   run/           <name>.{plan,loop}.{pid,log} — double-launch guard + child logs
@@ -82,6 +86,9 @@ PULL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts"
 CHECKOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "checkout.py")
 PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "plugin.py")
 RELAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relaunch")
+# `relaunch` skips the rebuild when the preview already serves the checked-out
+# commits; `relaunch force` is the same keyword with that check turned off.
+RELAUNCH_WORDS = ("relaunch", "relaunch force")
 # message_id → offer map for `checkout`: reacting to an offer message triggers its
 # build. Persisted so an offer survives the restart between posting and reacting.
 OFFERS_FILE = os.path.join(RUN_DIR, "checkout_offers.json")
@@ -189,7 +196,9 @@ HELP = (
     "state); react to one to check ALL repos out, rebuild with the backend "
     "volumes reset, and get the URLs with the branch behind each.\n"
     "• relaunch — rebuild this project's preview stack from the CURRENT checkout "
-    "(no branch switch, dev database kept) and post its URLs + branches.\n"
+    "(no branch switch, dev database kept) and post its URLs + branches. Already "
+    "serving these commits? it just re-posts the URLs — `relaunch force` rebuilds "
+    "anyway.\n"
     "• anything else (text, voice, or an image with optional caption) — dropped "
     "as an intent note for the next plan; an image becomes a permanent resource "
     "the plan looks at (mockup, bug screenshot, sketch).\n"
@@ -1118,7 +1127,13 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
         cmd, ack = ["claude", "-p", "/machines-at-work:retro headless", *PLAN_CLAUDE_FLAGS], \
                    "📋 retro — mining finished tasks; proposals will post back…"
     else:
-        cmd, ack = ["claude", "-p", "/machines-at-work:plan headless", *PLAN_CLAUDE_FLAGS], "🧠 planning…"
+        # Plan is the one dispatch that gets an explicit model: it is judgment
+        # over intent (decompose, feature boundaries, Decision: gates) and its
+        # short sessions make the strongest model cheap relative to the build
+        # iterations a bad decomposition costs. unblock/retro stay on the CLI
+        # default; loop.sh pins its own (MODEL=opus|sonnet|fable).
+        cmd, ack = ["claude", "-p", "/machines-at-work:plan headless",
+                    "--model", cfg["plan_model"], *PLAN_CLAUDE_FLAGS], "🧠 planning…"
     base = f"{name}.{action}"
     if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
         return fail(f"skip: {action} already running for {name}", f"{action} is already running")
@@ -1229,7 +1244,7 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
 
     # relaunch is project-scoped — it rebuilds ONE project's preview. In a topic
     # with no workspace, say so rather than firing a free-form `claude -p`.
-    if stripped == "relaunch" and not entry:
+    if stripped in RELAUNCH_WORDS and not entry:
         return fail("skip: relaunch needs a project topic",
                     "run `relaunch` inside a project topic — it rebuilds that project's preview.")
 
@@ -1250,7 +1265,7 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
     # `relaunch`: rebuild just this project's preview stack (down → fresh up) and
     # post the new frontend URL. Detached — the rebuild takes minutes; relaunch
     # posts the URL (or a failure) into the topic itself when it's done.
-    if stripped == "relaunch":
+    if stripped in RELAUNCH_WORDS:
         name = entry["name"]
         base = f"{name}.relaunch"
         if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
@@ -1259,8 +1274,14 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
         if busy:   # a rebuild mid-build would swap branches under a running loop
             return fail(f"skip: {busy} already running for {name}",
                         f"{busy} is still running for {name} — wait for it to finish, then retry")
+        # A plain `relaunch` no-ops when the preview already serves the checked-out
+        # commits (relaunch's build watermark). `relaunch force` is the way to say
+        # "I don't care what the watermark thinks, build it again" from the phone —
+        # the only escape hatch a Telegram user has when a preview looks wrong in a
+        # way the watermark can't see.
+        argv = [RELAUNCH, name] if stripped == "relaunch" else [RELAUNCH, "--force", name]
         try:
-            pid = spawn_detached([RELAUNCH, name], os.path.dirname(RELAUNCH), base)
+            pid = spawn_detached(argv, os.path.dirname(RELAUNCH), base)
         except OSError as e:
             return fail(f"error: spawn relaunch failed: {e}", f"couldn't start relaunch: {e}")
         api.send_message(cfg["chat_id"], f"🚀 relaunching {name} — the fresh frontend URL will follow.", thread_id)
@@ -1304,7 +1325,8 @@ def build_config(env):
                  f"to {ENV_FILE}.")
     return {"token": token, "chat_id": env.get("TELEGRAM_CHAT_ID"),
             "allowlist": allowlist, "maw_scripts": env.get("MAW_SCRIPTS"),
-            "general_workspace": env.get("GENERAL_WORKSPACE")}
+            "general_workspace": env.get("GENERAL_WORKSPACE"),
+            "plan_model": env.get("PLAN_MODEL", "claude-fable-5")}
 
 
 def run(once=False):

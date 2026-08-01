@@ -11,9 +11,9 @@ or reduce it. Think like an SRE reading an incident feed.
 
 ## Scope — hard rule
 Only propose changes to these two repos (the tooling that produced the logs):
-- `server-orchestrator` — `/home/agent/all-machines-at-work/server-orchestrator`
+- `orchestrator` — `/home/agent/intentpipe/orchestrator`
   (daemon.py, relaunch, system-scripts/, tg.sh, logmine/).
-- `intentpipe` (the plugin) — `/home/agent/all-machines-at-work/intentpipe-plugin`
+- `intentpipe` (the plugin) — `/home/agent/intentpipe/plugin`
   (scripts/, skills/, agents/, hooks/, templates/).
 
 **Never** propose changes to project app code (bibbles, tell-your-friends). If a
@@ -35,7 +35,7 @@ first, at most 6 items. Each item:
 ```json
 {
   "title": "one-line summary of the fix",
-  "repo": "server-orchestrator" | "intentpipe",
+  "repo": "orchestrator" | "intentpipe",
   "evidence": "the log line(s) or pattern that motivate this, quoted briefly",
   "problem": "what is going wrong, in one or two sentences",
   "change": "the specific mechanical change to make (files/functions if known)",

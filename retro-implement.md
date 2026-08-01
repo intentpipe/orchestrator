@@ -9,9 +9,9 @@ prompts.
 ## Scope — hard rule
 
 The target is the **intentpipe plugin repo**
-(`/home/agent/all-machines-at-work/intentpipe-plugin`) — your cwd. If a part of
+(`/home/agent/intentpipe/plugin`) — your cwd. If a part of
 the proposal's diff explicitly names files in
-`/home/agent/all-machines-at-work/server-orchestrator`, apply that part there,
+`/home/agent/intentpipe/orchestrator`, apply that part there,
 on its own branch + PR. Never touch project app code (bibbles,
 tell-your-friends) or any project workspace. If the proposal cannot be done
 within those repos, STOP and report why instead of overreaching.
@@ -33,7 +33,7 @@ within those repos, STOP and report why instead of overreaching.
    `proposals/` (repo convention for applied retros).
 4. **Verify.** intentpipe: `bash -n` every edited script, then
    `bash tests/smoke.sh`; bump `version` in `.claude-plugin/plugin.json` (the
-   project scaffolds auto-update off it). server-orchestrator: `python3 -m
+   project scaffolds auto-update off it). orchestrator: `python3 -m
    py_compile daemon.py` if touched, then `bash tests/smoke.sh`.
 5. **Commit** referencing the proposal file (repo rule), quoting its key
    evidence. **Push the branch and open a PR** (`gh pr create`) to the default

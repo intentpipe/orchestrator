@@ -61,8 +61,8 @@ Config (all under $ORCH_HOME, default ~/.agent-orchestrator):
   offset         last processed update_id (persisted, so restarts don't replay)
   run/           <name>.{plan,loop}.{pid,log} — double-launch guard + child logs
 
-Run:  server-orchestrator/daemon.py            # long-poll forever (systemd unit ships alongside)
-      server-orchestrator/daemon.py --once     # drain pending updates and exit (for verifying)
+Run:  orchestrator/daemon.py            # long-poll forever (systemd unit ships alongside)
+      orchestrator/daemon.py --once     # drain pending updates and exit (for verifying)
 """
 import json
 import os
@@ -624,10 +624,10 @@ def _open_logmine_prs(cfg):
     burned full Opus sessions re-implementing fixes that were already sitting in
     an open PR. Feeding the open ones back into the analysis closes that loop."""
     out = []
-    for repo in ("server-orchestrator", "intentpipe-plugin"):
+    for repo in ("orchestrator", "plugin"):
         try:
             r = subprocess.run(
-                ["gh", "pr", "list", "-R", f"all-machines-at-work/{repo}", "--state", "open",
+                ["gh", "pr", "list", "-R", f"intentpipe/{repo}", "--state", "open",
                  "--json", "number,title,headRefName"],
                 capture_output=True, text=True, timeout=30)
             for pr in json.loads(r.stdout or "[]"):
@@ -721,7 +721,7 @@ def start_logmine_implement(lm, cfg, api):
     p = lm.get("proposal", {})
     topic = lm.get("topic")
     repo = p.get("repo")
-    cwd = ORCH_DIR if repo == "server-orchestrator" else _maw_plugin_dir(cfg)
+    cwd = ORCH_DIR if repo == "orchestrator" else _maw_plugin_dir(cfg)
     if not cwd or not os.path.isdir(cwd):
         api.send_message(cfg["chat_id"], f"⚠️ logmine: unknown target repo '{repo}' — can't implement.", topic)
         return f"logmine implement: bad repo {repo}"

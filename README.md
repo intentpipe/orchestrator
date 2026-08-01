@@ -25,12 +25,12 @@ what reads `telegram.env` at runtime. The token/chat/topic values are Telegram-s
    with **Manage Topics** permission.
 4. **Get the chat id.** Send any message in the group, then:
    ```
-   server-orchestrator/tg.sh chat-id            # prints e.g.  -1001234567890  me and my agents
+   orchestrator/tg.sh chat-id            # prints e.g.  -1001234567890  me and my agents
    ```
    Append it: `echo 'TELEGRAM_CHAT_ID=-1001234567890' >> ~/.agent-orchestrator/telegram.env`
 5. **Create the `scaffold` topic** (the maintainer inbox retros post into):
    ```
-   server-orchestrator/tg.sh new-topic scaffold  # prints a thread id, e.g. 2
+   orchestrator/tg.sh new-topic scaffold  # prints a thread id, e.g. 2
    ```
    Append it: `echo 'SCAFFOLD_RETRO_TOPIC_ID=2' >> ~/.agent-orchestrator/telegram.env`
 
@@ -222,7 +222,7 @@ Wire it per project in the workspace's `agents.env` — the plugin runs it detac
 when a task lands, once per headless loop run:
 
 ```sh
-AFTER_DONE='"$HOME/all-machines-at-work/server-orchestrator/system-scripts/checkout.py" --refresh "$INTENTPIPE_WORKSPACE"'
+AFTER_DONE='"$HOME/intentpipe/orchestrator/system-scripts/checkout.py" --refresh "$INTENTPIPE_WORKSPACE"'
 ```
 
 Two rules keep it safe unattended. It **gives way to work in flight**: a repo on a
@@ -333,7 +333,7 @@ It mirrors the `checkout` offer→react→build flow:
    cursor + per-file byte offsets, so nothing is double-read or skipped).
 2. A synchronous `claude -p` with `logmine/analyze.md` turns that into a JSON array of
    **tooling-improvement proposals**, scoped to the two repos that produced the logs
-   (`server-orchestrator`, the `intentpipe` plugin) — never project app code. The
+   (`orchestrator`, the `intentpipe` plugin) — never project app code. The
    watermark advances once analysis returns.
 3. Each proposal is posted as its own message, remembered by `message_id` (`run/logmine_offers.json`).
 4. **React to a proposal** → the daemon spawns a detached `claude -p` with `logmine/implement.md`

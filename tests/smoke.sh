@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test for the server-orchestrator daemon — the whole per-message contract
+# Smoke test for the orchestrator daemon — the whole per-message contract
 # of process_message, plus the status collector. Network, transcription, and the
 # status subprocess are stubbed; no Telegram, no git, no ports touched.
 set -euo pipefail

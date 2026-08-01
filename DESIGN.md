@@ -1,4 +1,4 @@
-# server-orchestrator · design & rationale
+# orchestrator · design & rationale
 
 > This project began life as a scaffold proposal (2026-07-09) and was later
 > extracted into its own repo: it is a **standalone server-side control plane**,
@@ -153,7 +153,7 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     reuses `status.py`'s enumeration (registry → agents.env → repos) and pulls each `--ff-only`, skipping any
     dirty/diverged tree. It also pulls the **intentpipe scaffold** — a sibling of `~/projects`, outside
     every workspace — resolved from `INTENTPIPE_SCRIPTS` via `git rev-parse --show-toplevel` (so the scripts/ path the
-    daemon already holds for 🚀 is enough). Scope stops at the fleet + scaffold; `server-orchestrator` itself is
+    daemon already holds for 🚀 is enough). Scope stops at the fleet + scaffold; `orchestrator` itself is
     pulled by hand, since a daemon change needs `relaunch` to take effect anyway. This is the line #11 predicted:
     the moment an ask *can* be named as a fixed op with a parameter, it belongs in a deterministic command, not
     the interpretation path.

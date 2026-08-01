@@ -6,8 +6,8 @@ Implement it end-to-end. You are running headless with
 
 ## Scope — hard rule
 Touch **only** the repo named in the proposal's `repo` field:
-- `server-orchestrator` → `/home/agent/all-machines-at-work/server-orchestrator`
-- `machines-at-work`     → `/home/agent/all-machines-at-work/machines-at-work`
+- `orchestrator` → `/home/agent/intentpipe/orchestrator`
+- `intentpipe`     → `/home/agent/intentpipe/plugin`
 
 Never touch project app code (bibbles, tell-your-friends). If the proposal cannot
 be done within that one repo, STOP and report why instead of overreaching.
@@ -24,12 +24,12 @@ be done within that one repo, STOP and report why instead of overreaching.
 3. **Make the change** described in `change`. Keep it minimal and mechanical —
    exactly what was proposed, nothing extra. Match the surrounding code's style
    and comment density.
-   - `machines-at-work`: after editing scripts run `bash -n` on them and
+   - `intentpipe`: after editing scripts run `bash -n` on them and
      `bash tests/smoke.sh`; bump `version` in `.claude-plugin/plugin.json`
      (the project scaffolds auto-update off this version). Editing the plugin
      requires the session cwd to be inside the plugin root (the guard's
      dev-session exemption) — `cd` there first.
-   - `server-orchestrator`: if you touched daemon.py, `python3 -m py_compile
+   - `orchestrator`: if you touched daemon.py, `python3 -m py_compile
      daemon.py`; run `bash tests/smoke.sh` if present.
 4. **Commit** with a message that states the fix and quotes the motivating log
    evidence from the proposal. End with the standard trailers.

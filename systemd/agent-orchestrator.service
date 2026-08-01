@@ -1,5 +1,5 @@
 # Inbound Telegram daemon, always-on. Install per README:
-#   cp all-machines-at-work/server-orchestrator/systemd/agent-orchestrator.service ~/.config/systemd/user/
+#   cp intentpipe/orchestrator/systemd/agent-orchestrator.service ~/.config/systemd/user/
 #   (edit User/paths below if not running as a user unit)
 #   systemctl --user enable --now agent-orchestrator
 # Secrets stay in ~/.agent-orchestrator/telegram.env (chmod 600), never here.
@@ -18,7 +18,7 @@ KillMode=process
 # service PATH omits — add it so the daemon can spawn `claude` for 🧠/🚀/General.
 Environment=PATH=%h/.local/bin:/opt/flutter/bin:/usr/local/bin:/usr/bin:/bin
 # %h = the running user's home. Adjust if the checkout lives elsewhere.
-ExecStart=%h/all-machines-at-work/server-orchestrator/daemon.py
+ExecStart=%h/intentpipe/orchestrator/daemon.py
 Restart=always
 RestartSec=5
 

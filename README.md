@@ -25,12 +25,12 @@ what reads `telegram.env` at runtime. The token/chat/topic values are Telegram-s
    with **Manage Topics** permission.
 4. **Get the chat id.** Send any message in the group, then:
    ```
-   server-orchestrator/tg.sh chat-id            # prints e.g.  -1001234567890  me and my agents
+   orchestrator/tg.sh chat-id            # prints e.g.  -1001234567890  me and my agents
    ```
    Append it: `echo 'TELEGRAM_CHAT_ID=-1001234567890' >> ~/.agent-orchestrator/telegram.env`
 5. **Create the `scaffold` topic** (the maintainer inbox retros post into):
    ```
-   server-orchestrator/tg.sh new-topic scaffold  # prints a thread id, e.g. 2
+   orchestrator/tg.sh new-topic scaffold  # prints a thread id, e.g. 2
    ```
    Append it: `echo 'SCAFFOLD_RETRO_TOPIC_ID=2' >> ~/.agent-orchestrator/telegram.env`
 
@@ -82,8 +82,8 @@ probe. Keep `ports.json` in sync with `projects/PORTS.md` when you add or move a
 ## Keyword: `pull-all`
 
 Send `pull-all` (text) in **any** topic and the daemon fast-forward-pulls the whole
-fleet — every registered project's repos **and** the `machines-at-work` scaffold
-(resolved from `MAW_SCRIPTS`, since it lives outside every project workspace) — then
+fleet — every registered project's repos **and** the `intentpipe` scaffold
+(resolved from `INTENTPIPE_SCRIPTS`, since it lives outside every project workspace) — then
 replies with a per-repo result:
 
 ```
@@ -94,7 +94,7 @@ replies with a per-repo result:
    frontend main ✅ up to date
 • tell-your-friends
    app-mobile dev ✅ pulled · core dev ⏭ skipped (dirty, 2 files) · scaffold dev ✅ up to date
-• machines-at-work main ✅ pulled
+• intentpipe main ✅ pulled
 ```
 
 Guarded on purpose: a repo is pulled only if its tree is **clean** and the pull is a
@@ -110,10 +110,10 @@ pipeline instead of becoming a note (exact match only — "let's plan later" is 
 
 | token | action |
 |---|---|
-| 🧠 or `plan` | headless `/machines-at-work:plan` in the workspace — drains queued notes, posts the task list back into the topic. Runs on `PLAN_MODEL` (telegram.env, default `claude-fable-5`): planning is the pipeline's highest-judgment, lowest-token step, so it gets the strongest model — build cost is loop.sh's own `MODEL` knob |
-| 🚀 or `build-all` | detached `loop.sh` — set `MAW_SCRIPTS=` in `telegram.env` to the plugin's `scripts/` dir |
-| 🩹 or `unblock` | headless `/machines-at-work:unblock` — diagnoses why the build queue is stuck and auto-resolves the safe cases (finished-but-unmerged, clean retry); the rest are escalated with a precise reason |
-| 📋 or `retro` | headless `/machines-at-work:retro` — mines this project's finished tasks for recurring pipeline weaknesses; each new report posts back as its own message, and **reacting to one applies it**: a headless run in the machines-at-work repo makes the proposed change and opens a PR for you to merge |
+| 🧠 or `plan` | headless `/intentpipe:plan` in the workspace — drains queued notes, posts the task list back into the topic. Runs on `PLAN_MODEL` (telegram.env, default `claude-fable-5`): planning is the pipeline's highest-judgment, lowest-token step, so it gets the strongest model — build cost is loop.sh's own `MODEL` knob |
+| 🚀 or `build-all` | detached `loop.sh` — set `INTENTPIPE_SCRIPTS=` in `telegram.env` to the plugin's `scripts/` dir |
+| 🩹 or `unblock` | headless `/intentpipe:unblock` — diagnoses why the build queue is stuck and auto-resolves the safe cases (finished-but-unmerged, clean retry); the rest are escalated with a precise reason |
+| 📋 or `retro` | headless `/intentpipe:retro` — mines this project's finished tasks for recurring pipeline weaknesses; each new report posts back as its own message, and **reacting to one applies it**: a headless run in the intentpipe repo makes the proposed change and opens a PR for you to merge |
 
 🚀 is the plan approval: text intent → 🧠 → read the posted plan → 🚀. A second trigger while
 one is running replies "already running" (pidfiles + child logs under `~/.agent-orchestrator/run/`).
@@ -141,7 +141,7 @@ next 🧠 to plan.
 Anything else in a project topic queues as an intent note for the next 🧠 — text as-is, voice
 transcribed (the transcript quoted back so a mis-hear is visible). **Images too**: a photo — or a
 screenshot sent "as file" for full quality — lands next to its caption note in the workspace inbox;
-at plan time the plugin files it as a permanent `machines-at-work/resources/` file and the planner
+at plan time the plugin files it as a permanent `intentpipe/resources/` file and the planner
 reads the picture itself (a UI mockup, a bug screenshot, a sketch), turning it into implementation
 tasks that reference it (`Resources:`). Non-image documents are refused with a reply.
 
@@ -204,7 +204,7 @@ reaction on any non-offer message does nothing.
 
 ### The same thing without picking: `checkout.py --refresh`
 
-`machines-at-work`'s `task.sh done` puts every repo back on the default branch, so
+`intentpipe`'s `task.sh done` puts every repo back on the default branch, so
 the moment a task lands the preview goes back to serving the mainline — amend a PR
 and you get a rebuilt preview of `dev`. `--refresh` closes that loop:
 
@@ -222,7 +222,7 @@ Wire it per project in the workspace's `agents.env` — the plugin runs it detac
 when a task lands, once per headless loop run:
 
 ```sh
-AFTER_DONE='"$HOME/all-machines-at-work/server-orchestrator/system-scripts/checkout.py" --refresh "$MAW_WORKSPACE"'
+AFTER_DONE='"$HOME/intentpipe/orchestrator/system-scripts/checkout.py" --refresh "$INTENTPIPE_WORKSPACE"'
 ```
 
 Two rules keep it safe unattended. It **gives way to work in flight**: a repo on a
@@ -262,13 +262,13 @@ behaviour. Short-circuits like `status`; never writes a note.
 
 ## Keyword: `plugin` (🔌) · skill: `/plugin`
 
-Update the `machines-at-work` plugin install from its source tree and report the
+Update the `intentpipe` plugin install from its source tree and report the
 version every project is running — the same op on two surfaces: send `plugin` or
 🔌 in **any** topic, or run `/plugin` from a Claude Code session **inside this
 repo** (`.claude/skills/plugin/`).
 
 ```
-🔌 machines-at-work plugin
+🔌 intentpipe plugin
 
 source  0.26.0  (main 3e33829)
 cache   0.24.0 → 0.26.0 ✅ reinstalled
@@ -290,7 +290,7 @@ about the fleet's tooling belongs to no single project.
 is the cache version. What genuinely varies per project is whether it *enables* the
 plugin (`<root>/.claude/settings.json` → `enabledPlugins`), which is why that is the
 per-project line: a project missing it runs no version at all — its
-`/machines-at-work:*` skills and its 🧠/🚀/🩹 triggers silently do nothing. The
+`/intentpipe:*` skills and its 🧠/🚀/🩹 triggers silently do nothing. The
 report names that with the one-line fix and never edits another project's settings.
 
 Mechanics: `system-scripts/plugin.py` (pure stdlib; reuses `status.py` for the
@@ -299,7 +299,7 @@ behind both surfaces, so the keyword and the skill can never drift. It also runs
 from a shell — `plugin.py [--check] [--pull] [--post] [--source <dir>]` — and is
 the same reinstall `sync_plugin` performs before a dispatch (see **Plugin
 freshness** below), made on-demand and given a report. The daemon passes its own
-`--source` (from `MAW_SCRIPTS`) so the keyword and `sync_plugin` can't resolve
+`--source` (from `INTENTPIPE_SCRIPTS`) so the keyword and `sync_plugin` can't resolve
 different source trees.
 
 ## Topics with no project
@@ -333,7 +333,7 @@ It mirrors the `checkout` offer→react→build flow:
    cursor + per-file byte offsets, so nothing is double-read or skipped).
 2. A synchronous `claude -p` with `logmine/analyze.md` turns that into a JSON array of
    **tooling-improvement proposals**, scoped to the two repos that produced the logs
-   (`server-orchestrator`, the `machines-at-work` plugin) — never project app code. The
+   (`orchestrator`, the `intentpipe` plugin) — never project app code. The
    watermark advances once analysis returns.
 3. Each proposal is posted as its own message, remembered by `message_id` (`run/logmine_offers.json`).
 4. **React to a proposal** → the daemon spawns a detached `claude -p` with `logmine/implement.md`
@@ -345,12 +345,12 @@ Not reacting is an implicit "deny" — the proposal simply expires from the map.
 
 ## Plugin freshness (`sync_plugin`)
 
-The `machines-at-work` plugin's **skills** run from a version-pinned install *cache*
-(`~/.claude/plugins/cache/…`), while only its `scripts/` run live via `MAW_SCRIPTS`. So a
+The `intentpipe` plugin's **skills** run from a version-pinned install *cache*
+(`~/.claude/plugins/cache/…`), while only its `scripts/` run live via `INTENTPIPE_SCRIPTS`. So a
 version bump that isn't reinstalled leaves headless skill runs (plan/build/unblock) executing a
 **stale** copy — this is a real trap: the cache once sat at 0.19.0, predating the `unblock`
 skill entirely, so the 🩹 trigger invoked a skill that wasn't installed. `sync_plugin()` runs
 before every dispatch: if the source `plugin.json` version moved past what's installed, it
 `claude plugin marketplace update` + `claude plugin update` to refresh the cache. That is what
-keeps the project scaffolds auto-updated to a new machines-at-work version — bump the version,
+keeps the project scaffolds auto-updated to a new intentpipe version — bump the version,
 and the next plan/build/unblock/logmine reinstalls it.

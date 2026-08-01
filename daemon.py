@@ -7,12 +7,12 @@ rationale: DESIGN.md (alongside this file).
 
 Long-poll getUpdates → enforce the allowlist (the only door, Decision #4) →
 resolve the message's forum topic to a workspace via the registry → then either
-dispatch a trigger token (Decision #10: 🧠/`plan` → headless /machines-at-work:plan,
-🚀/`build-all` → detached loop.sh, 🩹/`unblock` → headless /machines-at-work:unblock,
-📋/`retro` → headless /machines-at-work:retro, whose new reports post back
-react-to-apply, 🧹/`cleanup` → headless /machines-at-work:cleanup; exact match only) or transcribe voice / take
+dispatch a trigger token (Decision #10: 🧠/`plan` → headless /intentpipe:plan,
+🚀/`build-all` → detached loop.sh, 🩹/`unblock` → headless /intentpipe:unblock,
+📋/`retro` → headless /intentpipe:retro, whose new reports post back
+react-to-apply, 🧹/`cleanup` → headless /intentpipe:cleanup; exact match only) or transcribe voice / take
 text and drop the RAW message into <workspace>/updates/.inbox/<epoch>-<msgid>.md
-— machines-at-work's inbound.sh contract; the plugin names and formats notes,
+— intentpipe's inbound.sh contract; the plugin names and formats notes,
 never the daemon. An image (photo, or an image/* document) is intent too: it is
 downloaded next to its caption note under the same <epoch>-<msgid> base and
 referenced by bare basename ([image: <name>]); inbound.sh turns it into a
@@ -23,10 +23,10 @@ Keyword `status` short-circuits routing and replies with a live report
 (branches + FE/BE up/down) from system-scripts/status.py: scoped to the one
 project when sent in its topic, all projects when sent anywhere else. Keyword
 `pull-all` likewise short-circuits: system-scripts/pull.py fast-forward-pulls the
-whole fleet (every project's repos + the machines-at-work scaffold via
-MAW_SCRIPTS), skipping any dirty tree, and replies with a per-repo result.
+whole fleet (every project's repos + the intentpipe scaffold via
+INTENTPIPE_SCRIPTS), skipping any dirty tree, and replies with a per-repo result.
 Keyword `plugin` (or 🔌) short-circuits too: system-scripts/plugin.py reinstalls
-the machines-at-work plugin when its source version moved — the same reinstall
+the intentpipe plugin when its source version moved — the same reinstall
 sync_plugin does silently before a dispatch — and replies with the source and
 cache versions plus what each project actually runs.
 Keyword `help` short-circuits the same way, replying with the full command list.
@@ -52,7 +52,7 @@ note verbatim (Decision #11, reverted 2026-07-31).
 
 Config (all under $ORCH_HOME, default ~/.agent-orchestrator):
   telegram.env   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALLOWLIST (space/comma ids),
-                 MAW_SCRIPTS (path to the machines-at-work plugin's scripts/, for 🚀),
+                 INTENTPIPE_SCRIPTS (path to the intentpipe plugin's scripts/, for 🚀),
                  PLAN_MODEL (model for the headless 🧠 plan run; default
                  claude-fable-5 — planning is the pipeline's highest-judgment,
                  lowest-token step, so it gets the strongest model; 🚀 build
@@ -61,8 +61,8 @@ Config (all under $ORCH_HOME, default ~/.agent-orchestrator):
   offset         last processed update_id (persisted, so restarts don't replay)
   run/           <name>.{plan,loop}.{pid,log} — double-launch guard + child logs
 
-Run:  server-orchestrator/daemon.py            # long-poll forever (systemd unit ships alongside)
-      server-orchestrator/daemon.py --once     # drain pending updates and exit (for verifying)
+Run:  orchestrator/daemon.py            # long-poll forever (systemd unit ships alongside)
+      orchestrator/daemon.py --once     # drain pending updates and exit (for verifying)
 """
 import json
 import os
@@ -103,10 +103,10 @@ LOGMINE_ANALYZE = os.path.join(ORCH_DIR, "logmine", "analyze.md")
 LOGMINE_IMPLEMENT = os.path.join(ORCH_DIR, "logmine", "implement.md")
 LOGMINE_OFFERS_FILE = os.path.join(RUN_DIR, "logmine_offers.json")
 
-# retro: a project-topic `retro` keyword runs the plugin's /machines-at-work:retro
+# retro: a project-topic `retro` keyword runs the plugin's /intentpipe:retro
 # headless; when the run finishes, reap_jobs posts each NEW file the skill wrote
 # into <workspace>/retro/ as its own message, and a reaction on one applies it —
-# a headless run in the machines-at-work repo (branch + PR), mirroring the
+# a headless run in the intentpipe repo (branch + PR), mirroring the
 # logmine offer→react→implement flow. The human gate the retro skill promises
 # survives as the reaction plus the PR merge.
 RETRO_IMPLEMENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "retro-implement.md")
@@ -119,12 +119,15 @@ RETRO_OFFERS_FILE = os.path.join(RUN_DIR, "retro_offers.json")
 # folds the answer into the task and reopens it. Written by ask.sh, read here.
 DECISION_OFFERS_FILE = os.path.join(RUN_DIR, "decision_offers.json")
 
-# machines-at-work plugin: its SKILLS run from a version-pinned install CACHE
-# (only its scripts/ run live, via MAW_SCRIPTS), so a version bump that isn't
+# intentpipe plugin: its SKILLS run from a version-pinned install CACHE
+# (only its scripts/ run live, via INTENTPIPE_SCRIPTS), so a version bump that isn't
 # reinstalled leaves headless skill runs (plan/build/unblock) executing a STALE
 # copy. sync_plugin() reinstalls when the source version moved, before a dispatch.
-MAW_PLUGIN_ID = "machines-at-work@machines-at-work"
-MAW_MARKETPLACE = "machines-at-work"
+INTENTPIPE_PLUGIN_ID = "intentpipe@intentpipe"
+INTENTPIPE_MARKETPLACE = "intentpipe"
+# Workspace state dir, newest first. machines-at-work/ is the pre-rename name,
+# still accepted so a project can be renamed on its own schedule.
+WORKSPACE_DIRS = ("intentpipe", "machines-at-work")
 INSTALLED_PLUGINS = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
 
 # Ceiling for a General `claude -p` run. It parks the poll loop meanwhile (same
@@ -201,23 +204,23 @@ HELP = (
     "• status — live fleet report: git branch + FE/BE up/down. In a project "
     "topic it scopes to that project; elsewhere it covers every project.\n"
     "• pull-all — fast-forward-pull every repo in the fleet (and the "
-    "machines-at-work plugin); dirty trees are skipped, never clobbered.\n"
-    "• 🔌 or plugin — update the machines-at-work plugin install from source and "
+    "intentpipe plugin); dirty trees are skipped, never clobbered.\n"
+    "• 🔌 or plugin — update the intentpipe plugin install from source and "
     "report the version each project runs (a stale cache means stale skills).\n"
     "• logmine — read the orchestrator's own logs since last time and post "
     "tooling-improvement proposals; react to one to implement it (branch + PR).\n"
     "• help — this message.\n"
     "\n"
     "In a project topic:\n"
-    "• 🧠 or plan — plan the queued notes (headless /machines-at-work:plan).\n"
+    "• 🧠 or plan — plan the queued notes (headless /intentpipe:plan).\n"
     "• 🚀 or build-all — run the build loop (loop.sh, detached).\n"
     "• 🩹 or unblock — diagnose why the build queue is stuck and auto-resolve the "
     "safe cases (finished-but-unmerged, clean retry); the rest are escalated with a reason.\n"
     "• 📋 or retro — mine this project's finished tasks for pipeline weaknesses "
-    "(headless /machines-at-work:retro); each proposal posts back — react to one "
-    "to apply it as a machines-at-work PR.\n"
+    "(headless /intentpipe:retro); each proposal posts back — react to one "
+    "to apply it as a intentpipe PR.\n"
     "• 🧹 or cleanup — sweep the repos for dead/duplicated code (headless "
-    "/machines-at-work:cleanup, read-only); findings land as an updates/ note — "
+    "/intentpipe:cleanup, read-only); findings land as an updates/ note — "
     "🧠 to plan them.\n"
     "• checkout — post the checkout options (default branch + each open-PR "
     "state); react to one to check ALL repos out, rebuild with the backend "
@@ -390,11 +393,11 @@ def instruction_text(msg, api, cfg, thread_id):
 
 
 def pull_report(maw_scripts=None):
-    """Fast-forward-pull the whole fleet (registry repos + the machines-at-work
-    scaffold when MAW_SCRIPTS is set); pull.py's stdout is the Telegram reply.
+    """Fast-forward-pull the whole fleet (registry repos + the intentpipe
+    scaffold when INTENTPIPE_SCRIPTS is set); pull.py's stdout is the Telegram reply.
     Synchronous like status_report — parks the poll loop while pulling, bounded by
     the timeout. --repo takes any path inside the scaffold repo; pull.py resolves
-    it to the repo root, so passing MAW_SCRIPTS (its scripts/ dir) is enough."""
+    it to the repo root, so passing INTENTPIPE_SCRIPTS (its scripts/ dir) is enough."""
     cmd = [sys.executable, PULL] + (["--repo", maw_scripts] if maw_scripts else [])
     out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     if out.returncode != 0:
@@ -403,7 +406,7 @@ def pull_report(maw_scripts=None):
 
 
 def plugin_report(plugin_dir=None):
-    """Reinstall the machines-at-work plugin if its source moved, then report the
+    """Reinstall the intentpipe plugin if its source moved, then report the
     version every project runs; plugin.py's stdout is the Telegram reply. The
     daemon posts it into the topic the keyword came from, so plugin.py is run
     WITHOUT --post (which would also send it to the scaffold topic).
@@ -493,7 +496,7 @@ def _maw_plugin_dir(cfg):
 
 def _installed_plugin_version():
     try:
-        return json.load(open(INSTALLED_PLUGINS))["plugins"][MAW_PLUGIN_ID][0]["version"]
+        return json.load(open(INSTALLED_PLUGINS))["plugins"][INTENTPIPE_PLUGIN_ID][0]["version"]
     except Exception:
         return None
 
@@ -509,19 +512,19 @@ def _source_plugin_version(cfg):
 
 
 def sync_plugin(cfg):
-    """Reinstall the machines-at-work plugin when its source version moved past
+    """Reinstall the intentpipe plugin when its source version moved past
     what's installed, so headless skill runs (plan/build/unblock) never execute a
     STALE cached copy — the plugin's skills run from a version-pinned install
-    cache, only its scripts/ run live via MAW_SCRIPTS. No-op when already current;
+    cache, only its scripts/ run live via INTENTPIPE_SCRIPTS. No-op when already current;
     best-effort, never blocks a trigger. This is what keeps the project scaffolds
-    auto-updated to a new machines-at-work version."""
+    auto-updated to a new intentpipe version."""
     src = _source_plugin_version(cfg)
     inst = _installed_plugin_version()
     if not src or src == inst:
         return
     log(f"plugin update: installed {inst} → source {src}; reinstalling cache")
-    for cmd in (["claude", "plugin", "marketplace", "update", MAW_MARKETPLACE],
-                ["claude", "plugin", "update", MAW_PLUGIN_ID]):
+    for cmd in (["claude", "plugin", "marketplace", "update", INTENTPIPE_MARKETPLACE],
+                ["claude", "plugin", "update", INTENTPIPE_PLUGIN_ID]):
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
             if r.returncode != 0:
@@ -572,7 +575,7 @@ def resolve_decision(mid, offer, reply_text, cfg, api, thread_id, react, fail):
         return fail("skip: empty decision reply", "reply with the decision text.")
     scripts = cfg.get("maw_scripts")
     if not scripts:
-        return fail("skip: MAW_SCRIPTS unset", "MAW_SCRIPTS is not set — can't record the decision.")
+        return fail("skip: INTENTPIPE_SCRIPTS unset", "INTENTPIPE_SCRIPTS is not set — can't record the decision.")
     task, workspace = offer["task"], offer["workspace"]
     try:
         out = subprocess.run([os.path.join(scripts, "task.sh"), "resolve", task, text],
@@ -621,10 +624,10 @@ def _open_logmine_prs(cfg):
     burned full Opus sessions re-implementing fixes that were already sitting in
     an open PR. Feeding the open ones back into the analysis closes that loop."""
     out = []
-    for repo in ("server-orchestrator", "machines-at-work"):
+    for repo in ("orchestrator", "plugin"):
         try:
             r = subprocess.run(
-                ["gh", "pr", "list", "-R", f"all-machines-at-work/{repo}", "--state", "open",
+                ["gh", "pr", "list", "-R", f"intentpipe/{repo}", "--state", "open",
                  "--json", "number,title,headRefName"],
                 capture_output=True, text=True, timeout=30)
             for pr in json.loads(r.stdout or "[]"):
@@ -718,7 +721,7 @@ def start_logmine_implement(lm, cfg, api):
     p = lm.get("proposal", {})
     topic = lm.get("topic")
     repo = p.get("repo")
-    cwd = ORCH_DIR if repo == "server-orchestrator" else _maw_plugin_dir(cfg)
+    cwd = ORCH_DIR if repo == "orchestrator" else _maw_plugin_dir(cfg)
     if not cwd or not os.path.isdir(cwd):
         api.send_message(cfg["chat_id"], f"⚠️ logmine: unknown target repo '{repo}' — can't implement.", topic)
         return f"logmine implement: bad repo {repo}"
@@ -782,7 +785,7 @@ def _proposal_summary(path):
 def offer_retro_proposals(job, cfg, api):
     """A finished `retro` run: post each NEW file under <workspace>/retro/ into
     the topic and remember message_id → file, so a reaction applies it (a
-    headless branch-plus-PR run in the machines-at-work repo). Mirrors the
+    headless branch-plus-PR run in the intentpipe repo). Mirrors the
     logmine offer→react→implement flow; what a report says is the skill's
     business — the daemon only routes the file."""
     new = [f for f in _retro_files(job["workspace"]) if f not in set(job.get("retro_before", []))]
@@ -795,7 +798,7 @@ def offer_retro_proposals(job, cfg, api):
         title, conf = _proposal_summary(path)
         body = (f"📋 retro proposal · {job['name']}\n{title}\n"
                 + (f"confidence: {conf}\n" if conf else "")
-                + f"\n{fname}\n\nReact to this message to apply it (branch + PR in the machines-at-work repo).")
+                + f"\n{fname}\n\nReact to this message to apply it (branch + PR in the intentpipe repo).")
         resp = api.send_message(cfg["chat_id"], body, job.get("topic"))
         mid = (resp or {}).get("result", {}).get("message_id")
         if mid is not None:
@@ -806,14 +809,14 @@ def offer_retro_proposals(job, cfg, api):
 
 def start_retro_apply(ro, cfg, api):
     """A reaction on a retro proposal message: apply it headless in the
-    machines-at-work repo (branch + PR) — the same shape as logmine's implement.
+    intentpipe repo (branch + PR) — the same shape as logmine's implement.
     The retro skill's human gate survives as the reaction plus the PR merge;
     nothing lands on a default branch."""
     topic = ro.get("topic")
     path = ro.get("file", "")
     cwd = _maw_plugin_dir(cfg)
     if not cwd or not os.path.isdir(cwd):
-        api.send_message(cfg["chat_id"], "⚠️ retro: MAW_SCRIPTS unset or missing — can't apply.", topic)
+        api.send_message(cfg["chat_id"], "⚠️ retro: INTENTPIPE_SCRIPTS unset or missing — can't apply.", topic)
         return "retro apply: no plugin dir"
     if not os.path.isfile(path):
         api.send_message(cfg["chat_id"], f"⚠️ retro: proposal file is gone: {path}", topic)
@@ -905,7 +908,7 @@ def write_image_inbox(workspace, msg, api, file_id, ext_hint):
 
 
 def write_inbox(workspace, text, msg):
-    """Raw drop per machines-at-work's inbound.sh contract (its DESIGN #27):
+    """Raw drop per intentpipe's inbound.sh contract (its DESIGN #27):
     updates/.inbox/<epoch>-<msgid>.md, lexical = chronological. Naming and
     formatting the note it becomes is the plugin's business, not ours."""
     inbox = os.path.join(workspace, "updates", ".inbox")
@@ -1108,16 +1111,16 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
     if action == "loop":
         scripts = cfg.get("maw_scripts")
         if not scripts:
-            return fail("skip: MAW_SCRIPTS unset",
-                        "MAW_SCRIPTS is not set in telegram.env — can't launch loop.sh")
+            return fail("skip: INTENTPIPE_SCRIPTS unset",
+                        "INTENTPIPE_SCRIPTS is not set in telegram.env — can't launch loop.sh")
         cmd, ack = [os.path.join(scripts, "loop.sh")], "🚀 loop started"
     elif action == "unblock":
-        cmd, ack = ["claude", "-p", "/machines-at-work:unblock headless", *PLAN_CLAUDE_FLAGS], "🩹 unblocking…"
+        cmd, ack = ["claude", "-p", "/intentpipe:unblock headless", *PLAN_CLAUDE_FLAGS], "🩹 unblocking…"
     elif action == "retro":
-        cmd, ack = ["claude", "-p", "/machines-at-work:retro headless", *PLAN_CLAUDE_FLAGS], \
+        cmd, ack = ["claude", "-p", "/intentpipe:retro headless", *PLAN_CLAUDE_FLAGS], \
                    "📋 retro — mining finished tasks; proposals will post back…"
     elif action == "cleanup":
-        cmd, ack = ["claude", "-p", "/machines-at-work:cleanup headless", *PLAN_CLAUDE_FLAGS], \
+        cmd, ack = ["claude", "-p", "/intentpipe:cleanup headless", *PLAN_CLAUDE_FLAGS], \
                    "🧹 sweeping for dead/duplicated code — findings land as an updates/ note…"
     else:
         # Plan is the one dispatch that gets an explicit model: it is judgment
@@ -1125,7 +1128,7 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
         # short sessions make the strongest model cheap relative to the build
         # iterations a bad decomposition costs. unblock/retro stay on the CLI
         # default; loop.sh pins its own (MODEL=opus|sonnet|fable).
-        cmd, ack = ["claude", "-p", "/machines-at-work:plan headless",
+        cmd, ack = ["claude", "-p", "/intentpipe:plan headless",
                     "--model", cfg["plan_model"], *PLAN_CLAUDE_FLAGS], "🧠 planning…"
     base = f"{name}.{action}"
     if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
@@ -1135,13 +1138,13 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
         return fail(f"skip: {busy} already running for {name}",
                     f"{busy} is still running for {name} — wait for it to finish, then retry")
     # The agents declare `memory: project`, which claude resolves from cwd. The
-    # registry's workspace is <root>/machines-at-work, so spawning there gave
+    # registry's workspace is <root>/intentpipe, so spawning there gave
     # every headless run a different memory store than an interactive session at
     # the project root — the stores forked and lessons stopped being delivered
     # (plugin proposals/2026-07-29-agent-memory-forks-by-cwd.md). Only the spawn
     # cwd moves; inbox writes, task.sh resolve etc. keep using `workspace`.
     root = os.path.dirname(workspace) \
-        if os.path.basename(workspace.rstrip("/")) == "machines-at-work" else workspace
+        if os.path.basename(workspace.rstrip("/")) in WORKSPACE_DIRS else workspace
     track = {"name": name, "action": action, "topic": thread_id}
     if action == "retro":   # reap_jobs posts the files the run adds under retro/
         track.update(workspace=workspace, retro_before=_retro_files(workspace))
@@ -1207,7 +1210,7 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
         return f"status report sent ({entry['name'] if entry else 'all'})"
 
     # `pull-all`: fleet-wide, so it short-circuits routing like `status` and works
-    # in any topic. Includes the machines-at-work scaffold (MAW_SCRIPTS), which
+    # in any topic. Includes the intentpipe scaffold (INTENTPIPE_SCRIPTS), which
     # lives outside every project workspace. Never writes a note.
     if stripped in ("pull-all", "pull all"):
         api.send_message(cfg["chat_id"], pull_report(cfg.get("maw_scripts")), thread_id)
@@ -1333,7 +1336,7 @@ def build_config(env):
                  "security model (Decision #4); add ALLOWLIST=<your telegram user id> "
                  f"to {ENV_FILE}.")
     return {"token": token, "chat_id": env.get("TELEGRAM_CHAT_ID"),
-            "allowlist": allowlist, "maw_scripts": env.get("MAW_SCRIPTS"),
+            "allowlist": allowlist, "maw_scripts": env.get("INTENTPIPE_SCRIPTS"),
             "plan_model": env.get("PLAN_MODEL", "claude-fable-5")}
 
 

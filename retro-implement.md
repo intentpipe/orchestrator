@@ -1,17 +1,17 @@
 # retro — apply one accepted proposal
 
-A human accepted the machines-at-work improvement proposal below (full markdown
-report, after `=== PROPOSAL ===`). It was written by `/machines-at-work:retro`
+A human accepted the intentpipe improvement proposal below (full markdown
+report, after `=== PROPOSAL ===`). It was written by `/intentpipe:retro`
 in a project workspace; you apply it in the plugin's own repo. You are running
 headless with `--dangerously-skip-permissions`; there is nobody to answer
 prompts.
 
 ## Scope — hard rule
 
-The target is the **machines-at-work plugin repo**
-(`/home/agent/all-machines-at-work/machines-at-work`) — your cwd. If a part of
+The target is the **intentpipe plugin repo**
+(`/home/agent/intentpipe/plugin`) — your cwd. If a part of
 the proposal's diff explicitly names files in
-`/home/agent/all-machines-at-work/server-orchestrator`, apply that part there,
+`/home/agent/intentpipe/orchestrator`, apply that part there,
 on its own branch + PR. Never touch project app code (bibbles,
 tell-your-friends) or any project workspace. If the proposal cannot be done
 within those repos, STOP and report why instead of overreaching.
@@ -31,9 +31,9 @@ within those repos, STOP and report why instead of overreaching.
    numbers and surrounding text, keep the substance exact, add nothing extra.
    Match the surrounding style and comment density. Copy the proposal file into
    `proposals/` (repo convention for applied retros).
-4. **Verify.** machines-at-work: `bash -n` every edited script, then
+4. **Verify.** intentpipe: `bash -n` every edited script, then
    `bash tests/smoke.sh`; bump `version` in `.claude-plugin/plugin.json` (the
-   project scaffolds auto-update off it). server-orchestrator: `python3 -m
+   project scaffolds auto-update off it). orchestrator: `python3 -m
    py_compile daemon.py` if touched, then `bash tests/smoke.sh`.
 5. **Commit** referencing the proposal file (repo rule), quoting its key
    evidence. **Push the branch and open a PR** (`gh pr create`) to the default

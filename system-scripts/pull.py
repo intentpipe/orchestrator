@@ -3,7 +3,7 @@
 
 Same layer/enumeration as status.py (which it imports, not duplicates): registry
 projects → each workspace's agents.env → its code repos, plus any extra repos
-passed on the command line. The daemon passes MAW_SCRIPTS so the machines-at-work
+passed on the command line. The daemon passes INTENTPIPE_SCRIPTS so the intentpipe
 plugin repo — outside any project workspace — is pulled too.
 
 Pulling can silently eat uncommitted work, so each repo is guarded: pulled only
@@ -44,7 +44,7 @@ def _pull_one(path):
 
 def build_report(extra_repos=()):
     """Pull every registered project's repos, then each extra repo (e.g. the
-    machines-at-work scaffold). Text output is the Telegram reply."""
+    intentpipe scaffold). Text output is the Telegram reply."""
     lines = ["📥 pull-all", ""]
     for p in status._projects():
         lines.append(f"• {p['name']}")

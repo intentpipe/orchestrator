@@ -1,7 +1,7 @@
 # Proposal 2026-07-19 · emoji/keyword triggers (🧠 plan · 🚀 build-all), message-lifecycle reactions, inbox contract fix
 
 Touches `daemon.py`, `tests/smoke.sh`, DESIGN.md (new decision, #2/#9 superseded in part).
-Companion (plugin side): `machines-at-work/proposals/2026-07-19-headless-plan.md`.
+Companion (plugin side): `intentpipe/proposals/2026-07-19-headless-plan.md`.
 Realizes the deterministic half of Phase 3 — without the `claude -p` judgment router.
 
 ## Goal
@@ -10,7 +10,7 @@ Exact-match tokens in a project's topic drive the pipeline from the phone:
 
 | token | action |
 |---|---|
-| 🧠 or `plan` | headless `/machines-at-work:plan` in the workspace |
+| 🧠 or `plan` | headless `/intentpipe:plan` in the workspace |
 | 🚀 or `build-all` | detached `loop.sh` in the workspace |
 
 Any other message stays what it is today: an intent note.
@@ -18,7 +18,7 @@ Any other message stays what it is today: an intent note.
 ## Prerequisite fix: the inbound contract has drifted
 
 `write_note()` writes `<workspace>/updates/<ts>-<kind>.md` with daemon-owned naming and a
-daemon-owned header. machines-at-work 0.15.0 moved note-handling into the plugin
+daemon-owned header. intentpipe 0.15.0 moved note-handling into the plugin
 (`inbound.sh`, its DESIGN #27): the server drops **raw** messages into
 `updates/.inbox/<epoch>-<msgid>.md`; the plugin names and formats notes. Today nothing ever
 lands in `.inbox/`, so `inbound.sh` is a live no-op and the daemon owns conventions it
@@ -51,7 +51,7 @@ unbuilt until a message genuinely needs interpretation.
 Spawn detached (`start_new_session=True`, cwd = workspace, output to a log under
 `$ORCH_HOME/run/`):
 
-    claude -p "/machines-at-work:plan headless"
+    claude -p "/intentpipe:plan headless"
 
 Ack immediately in the topic ("🧠 planning…"). Plan itself drains `.inbox/` (step 1 of the
 skill) and — per the companion proposal — posts the resulting task list to the topic via
@@ -59,9 +59,9 @@ skill) and — per the companion proposal — posts the resulting task list to t
 
 ### 3) 🚀 → detached loop.sh
 
-Spawn detached, cwd = workspace, `"$MAW_SCRIPTS/loop.sh"`, log under `$ORCH_HOME/run/`.
+Spawn detached, cwd = workspace, `"$INTENTPIPE_SCRIPTS/loop.sh"`, log under `$ORCH_HOME/run/`.
 Ack "🚀 loop started". Progress/escalations/finish already reach the topic — loop.sh calls
-`notify.sh` throughout. `MAW_SCRIPTS` (path to the installed plugin's `scripts/`) is a new
+`notify.sh` throughout. `INTENTPIPE_SCRIPTS` (path to the installed plugin's `scripts/`) is a new
 line in `telegram.env`; if unset, 🚀 replies with a config error instead of failing silently.
 
 ### 4) 🚀 is the approval — no pending state
@@ -88,7 +88,7 @@ calling again replaces the previous reaction). Lifecycle on every allow-listed m
   🧠/🚀 the reaction means *started*, not *finished*; completion arrives via `notify.sh`),
   or status report sent.
 - **😱 on failure, plus a reply saying what went wrong** — failed transcription,
-  unregistered topic, unsupported message type (image/sticker/…), missing `MAW_SCRIPTS`,
+  unregistered topic, unsupported message type (image/sticker/…), missing `INTENTPIPE_SCRIPTS`,
   spawn error, missing workspace. This upgrades today's silent swallows: an unregistered
   topic currently logs `skip:` and the phone hears nothing.
 
@@ -109,7 +109,7 @@ Extend `tests/smoke.sh` (stub API, stub spawner, tmp workspace):
 4. Second `🚀` with live pidfile → "already running" reply, no second spawn.
 5. Message in an unregistered topic → 👀 then 😱 and a reply naming the problem; no inbox file.
 6. Photo message → 😱 + "unsupported" reply.
-7. Plugin side already covered: machines-at-work's smoke test drains a faked `.inbox/`.
+7. Plugin side already covered: intentpipe's smoke test drains a faked `.inbox/`.
 
 ## Risks
 

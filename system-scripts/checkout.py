@@ -11,7 +11,7 @@ per code repo. The options are:
   • baseline    — every repo on its DEFAULT_BRANCH (the mainline / merged state).
   • per feature — one option per open-PR head branch. PRs are grouped across
                   repos by head branch, so a feature that touches both repos
-                  (same branch name in each — machines-at-work's task branches
+                  (same branch name in each — intentpipe's task branches
                   are named identically per repo) becomes a single option with
                   both repos on it. A repo with no open PR on that branch stays
                   on DEFAULT_BRANCH — e.g. a frontend-only PR leaves the backend
@@ -24,7 +24,7 @@ DONE=local project) simply contributes no PR options — never an error.
 `--refresh` is the same realisation without a human picking: it points the preview
 at the branch that was just developed (or, with no branch named, at the most
 recently updated open PR) and rebuilds it. That is what a project's AFTER_DONE
-hook calls when machines-at-work lands a task — otherwise every build leaves the
+hook calls when intentpipe lands a task — otherwise every build leaves the
 repos back on DEFAULT_BRANCH and the preview silently reverts to the mainline.
 
 Run:  checkout.py <workspace>            # human-readable option list
@@ -279,7 +279,7 @@ def build(offer):
 def _has_branch(path, branch):
     """True if `branch` exists in this repo — locally, as a remote-tracking ref, or
     on origin. EXISTENCE decides whether a repo takes part, not an open PR: under
-    machines-at-work a feature's PR opens only when its last task lands, so the
+    intentpipe a feature's PR opens only when its last task lands, so the
     branch carries work (and must be served) before any PR exists. Repos without
     it stay on the default branch — the same one-sided FE/BE rule options_for
     applies, just extended to branches GitHub hasn't heard of yet."""
@@ -404,9 +404,12 @@ def refresh(workspace, branch=None):
     wants is the LAST branch developed, which the queued round re-picks when it
     runs — not one rebuild per task, three deep."""
     workspace = os.path.normpath(workspace)
-    if not os.path.exists(os.path.join(workspace, "agents.env")) \
-            and os.path.exists(os.path.join(workspace, "machines-at-work", "agents.env")):
-        workspace = os.path.join(workspace, "machines-at-work")   # given the project root
+    if not os.path.exists(os.path.join(workspace, "agents.env")):
+        # given the project root; machines-at-work/ is the pre-rename name
+        for child in ("intentpipe", "machines-at-work"):
+            if os.path.exists(os.path.join(workspace, child, "agents.env")):
+                workspace = os.path.join(workspace, child)
+                break
     name = options_for(workspace)["name"]
     os.makedirs(RUN_DIR, exist_ok=True)
     pidfile = os.path.join(RUN_DIR, f"{name}.checkout.pid")

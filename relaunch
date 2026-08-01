@@ -82,7 +82,7 @@ PY
 any=0
 while IFS=$'\t' read -r topic name workspace; do
   any=1
-  root="$(dirname "$workspace")"                       # workspace = <root>/machines-at-work
+  root="$(dirname "$workspace")"                       # workspace = <root>/intentpipe
   dev="$(ls "$root"/*-dev.sh 2>/dev/null | head -1)"
   echo "=============================================================="
   echo "[relaunch] $name  (topic $topic, root $root)"

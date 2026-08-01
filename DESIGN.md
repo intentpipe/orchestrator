@@ -1,4 +1,4 @@
-# server-orchestrator · design & rationale
+# orchestrator · design & rationale
 
 > This project began life as a scaffold proposal (2026-07-09) and was later
 > extracted into its own repo: it is a **standalone server-side control plane**,
@@ -106,15 +106,15 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
    legibility or the deterministic gate. It's one branch in the daemon, so a mature project can run `auto`
    while a new/risky one stays `required`. Setting it per-project (not global) is what makes the mix cheap.
 10. **Deterministic tokens realize Phase 3's control; 🚀 is the approval (proposal 2026-07-19).** Exact-match
-   tokens in a registered topic — 🧠/`plan` → detached headless `/machines-at-work:plan`, 🚀/`build-all` →
-   detached `loop.sh` (located via `MAW_SCRIPTS` in telegram.env) — instead of the planned `claude -p` router:
+   tokens in a registered topic — 🧠/`plan` → detached headless `/intentpipe:plan`, 🚀/`build-all` →
+   detached `loop.sh` (located via `INTENTPIPE_SCRIPTS` in telegram.env) — instead of the planned `claude -p` router:
    four fixed tokens are mechanics, not judgment, so the router stays unbuilt until a message genuinely needs
    interpretation. Sending 🚀 after reading the posted plan *is* the approval, which supersedes #2's
    pending-approval state and #9's `APPROVAL_MODE` knob; the daemon stays stateless across messages (pidfiles
    under `$ORCH_HOME/run/` guard double-launch and survive restarts). Every allow-listed message gets a
    reaction lifecycle — 👀 received → 👌 queued/started, or 😱 + a reply naming the failure (bots may only
    use Telegram's fixed reaction set, hence not ✅/⚠️; strangers get no reaction at all, per #4). Same
-   change: raw messages now land in `updates/.inbox/<epoch>-<msgid>.md` per machines-at-work 0.15.0's
+   change: raw messages now land in `updates/.inbox/<epoch>-<msgid>.md` per intentpipe 0.15.0's
    `inbound.sh` contract — the daemon no longer names or formats notes, ending the drift where it did.
 
 11. **General-topic messages are the one judgment path: free-form → `claude -p` (2026-07-20).** Decision #10
@@ -151,9 +151,9 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     silently eat uncommitted work, so it's exactly the op that wants the skip-dirty guard applied *reliably*,
     which a free-form agent won't do. So `pull-all` is a keyword sibling of `status`: `system-scripts/pull.py`
     reuses `status.py`'s enumeration (registry → agents.env → repos) and pulls each `--ff-only`, skipping any
-    dirty/diverged tree. It also pulls the **machines-at-work scaffold** — a sibling of `~/projects`, outside
-    every workspace — resolved from `MAW_SCRIPTS` via `git rev-parse --show-toplevel` (so the scripts/ path the
-    daemon already holds for 🚀 is enough). Scope stops at the fleet + scaffold; `server-orchestrator` itself is
+    dirty/diverged tree. It also pulls the **intentpipe scaffold** — a sibling of `~/projects`, outside
+    every workspace — resolved from `INTENTPIPE_SCRIPTS` via `git rev-parse --show-toplevel` (so the scripts/ path the
+    daemon already holds for 🚀 is enough). Scope stops at the fleet + scaffold; `orchestrator` itself is
     pulled by hand, since a daemon change needs `relaunch` to take effect anyway. This is the line #11 predicted:
     the moment an ask *can* be named as a fixed op with a parameter, it belongs in a deterministic command, not
     the interpretation path.
@@ -180,7 +180,7 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     objection:* the per-project lines look redundant, since one user-scope install serves every project
     and they must all print the same number. They must all print the same number **only when every
     project enables the plugin** — a project whose `.claude/settings.json` lost the `enabledPlugins`
-    entry runs no version at all, and its `/machines-at-work:*` skills and 🧠/🚀/🩹 triggers then fail
+    entry runs no version at all, and its `/intentpipe:*` skills and 🧠/🚀/🩹 triggers then fail
     *silently*, which is exactly the class of quiet staleness this script exists to make loud. It reports
     that with the fix line and never edits another project's settings — enumerating is the orchestrator's
     job (the dependency runs one way), repairing a project is not.
@@ -236,7 +236,7 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     still never interprets a report — the file IS the interface, which is why the same flow works untouched
     for reports a subagent or a terminal session wrote, as long as they land in `retro/`. Relatedly, every
     trigger now spawns at the **project root**, not the registered workspace: the agents' `memory: project`
-    store resolves from cwd, and spawning in `<root>/machines-at-work` forked it away from interactive
+    store resolves from cwd, and spawning in `<root>/intentpipe` forked it away from interactive
     sessions (plugin proposal 2026-07-29-agent-memory-forks-by-cwd).
 
 ## Phased build (each phase independently verifiable)

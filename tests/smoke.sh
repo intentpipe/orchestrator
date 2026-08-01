@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke test for the server-orchestrator daemon — the whole per-message contract
+# Smoke test for the orchestrator daemon — the whole per-message contract
 # of process_message, plus the status collector. Network, transcription, and the
 # status subprocess are stubbed; no Telegram, no git, no ports touched.
 set -euo pipefail
@@ -115,7 +115,7 @@ spawns = []
 daemon.spawn_detached = lambda cmd, cwd, base, track=None: spawns.append((cmd, cwd, base)) or 4242
 api = FakeAPI(); before = ls()
 assert daemon.process_message(mk(text="🧠", mid=10), cfg, reg, api) == "plan started for proj (pid 4242)"
-assert spawns[-1] == (["claude", "-p", "/machines-at-work:plan headless",
+assert spawns[-1] == (["claude", "-p", "/intentpipe:plan headless",
                        "--model", "claude-fable-5", *daemon.PLAN_CLAUDE_FLAGS], ws, "proj.plan"), \
     "plan runs on PLAN_MODEL (judgment step gets the strongest model); unblock/retro stay on the CLI default"
 assert "--permission-mode" in spawns[-1][0] and "Bash" in " ".join(spawns[-1][0]), "headless plan must run non-interactively"
@@ -123,12 +123,12 @@ assert api.reactions == [(10, "👀"), (10, "👌")] and api.sent[-1][1] == "�
 assert daemon.process_message(mk(text=" PLAN ", mid=11), cfg, reg, api).startswith("plan started"), "case/whitespace-insensitive"
 assert daemon.process_message(mk(text="build-all", mid=12), cfg, reg, api).startswith("loop started")
 assert spawns[-1][0] == ["/opt/maw/scripts/loop.sh"] and spawns[-1][2] == "proj.loop"
-# 🩹/unblock: headless /machines-at-work:unblock, own pidfile, non-interactive flags
+# 🩹/unblock: headless /intentpipe:unblock, own pidfile, non-interactive flags
 assert daemon.process_message(mk(text="🩹", mid=120), cfg, reg, api).startswith("unblock started for proj")
-assert spawns[-1][0] == ["claude", "-p", "/machines-at-work:unblock headless", *daemon.PLAN_CLAUDE_FLAGS] and spawns[-1][2] == "proj.unblock"
+assert spawns[-1][0] == ["claude", "-p", "/intentpipe:unblock headless", *daemon.PLAN_CLAUDE_FLAGS] and spawns[-1][2] == "proj.unblock"
 assert api.sent[-1][1] == "🩹 unblocking…"
 assert daemon.process_message(mk(text="unblock", mid=121), cfg, reg, api).startswith("unblock started"), "word form triggers too"
-# 📋/retro: headless /machines-at-work:retro, own pidfile; the track must carry the
+# 📋/retro: headless /intentpipe:retro, own pidfile; the track must carry the
 # workspace and the PRE-EXISTING retro reports so reap_jobs can post only new ones
 tracked = []
 daemon.spawn_detached = lambda cmd, cwd, base, track=None: tracked.append((cmd, cwd, base, track)) or 4242
@@ -136,12 +136,12 @@ os.makedirs(os.path.join(ws, "retro"), exist_ok=True)
 open(os.path.join(ws, "retro", "2026-07-01-old.md"), "w").write("# old\n")
 assert daemon.process_message(mk(text="retro", mid=130), cfg, reg, api).startswith("retro started for proj")
 cmd, cwd, base, track = tracked[-1]
-assert cmd == ["claude", "-p", "/machines-at-work:retro headless", *daemon.PLAN_CLAUDE_FLAGS] and base == "proj.retro"
+assert cmd == ["claude", "-p", "/intentpipe:retro headless", *daemon.PLAN_CLAUDE_FLAGS] and base == "proj.retro"
 assert track["workspace"] == ws and track["retro_before"] == ["2026-07-01-old.md"], track
 assert daemon.process_message(mk(text="📋", mid=131), cfg, reg, api).startswith("retro started"), "emoji form"
-# memory: project resolves from cwd — a workspace registered as <root>/machines-at-work
+# memory: project resolves from cwd — a workspace registered as <root>/intentpipe
 # must spawn at <root>, so headless runs share the interactive session's memory store
-mawws = os.path.join(tmp, "p2", "machines-at-work"); os.makedirs(mawws)
+mawws = os.path.join(tmp, "p2", "intentpipe"); os.makedirs(mawws)
 reg["6"] = {"name": "proj2", "workspace": mawws}
 assert daemon.process_message(mk(text="🧠", message_thread_id=6, mid=132), cfg, reg, api).startswith("plan started for proj2")
 assert tracked[-1][1] == os.path.join(tmp, "p2"), "spawn cwd must be the project ROOT, not the workspace"
@@ -183,9 +183,9 @@ open(os.path.join(daemon.RUN_DIR, "proj.loop.pid"), "w").write(str(os.getpid()))
 api = FakeAPI()
 assert daemon.process_message(mk(text="🚀", mid=14), cfg, reg, api).startswith("skip: loop already running")
 assert len(spawns) == n and api.reactions[-1] == (14, "😱") and "already running" in api.sent[-1][1]
-# MAW_SCRIPTS unset → 🚀 fails with a config error, never a silent no-op
-assert daemon.process_message(mk(text="🚀", mid=15), {**cfg, "maw_scripts": None}, reg, api).startswith("skip: MAW_SCRIPTS")
-assert "MAW_SCRIPTS" in api.sent[-1][1]
+# INTENTPIPE_SCRIPTS unset → 🚀 fails with a config error, never a silent no-op
+assert daemon.process_message(mk(text="🚀", mid=15), {**cfg, "maw_scripts": None}, reg, api).startswith("skip: INTENTPIPE_SCRIPTS")
+assert "INTENTPIPE_SCRIPTS" in api.sent[-1][1]
 # Release it: that pidfile was this check's fixture, and it now holds the whole
 # project (project_busy), which would make every later dispatch here "busy".
 os.remove(os.path.join(daemon.RUN_DIR, "proj.loop.pid"))
@@ -205,7 +205,7 @@ assert calls[-1] is None, calls
 assert ls() == before, "status must not write a note"
 
 # `pull-all`: short-circuits like status (writes no note), works in any topic,
-# passes MAW_SCRIPTS through so the scaffold repo is pulled too. Stub the runner.
+# passes INTENTPIPE_SCRIPTS through so the scaffold repo is pulled too. Stub the runner.
 pcalls = []
 daemon.pull_report = lambda maw=None: pcalls.append(maw) or "📥 pull-all\n(stub)"
 api = FakeAPI(); before = ls()
@@ -219,11 +219,11 @@ assert daemon.process_message(mk(text=" PULL ALL ", message_thread_id=77, mid=19
 # install serves every project), writes no note, and passes the daemon's own plugin
 # dir through so the keyword and sync_plugin can't resolve different sources.
 gcalls = []
-daemon.plugin_report = lambda plugin_dir=None: gcalls.append(plugin_dir) or "🔌 machines-at-work plugin\n(stub)"
+daemon.plugin_report = lambda plugin_dir=None: gcalls.append(plugin_dir) or "🔌 intentpipe plugin\n(stub)"
 api = FakeAPI(); before = ls()
 assert daemon.process_message(mk(text="plugin", mid=25), cfg, reg, api) == "plugin report sent"
 assert gcalls[-1] == "/opt/maw", gcalls  # maw_scripts /opt/maw/scripts → the plugin root
-assert api.sent[-1] == (5, "🔌 machines-at-work plugin\n(stub)")
+assert api.sent[-1] == (5, "🔌 intentpipe plugin\n(stub)")
 assert api.reactions == [(25, "👀"), (25, "👌")] and ls() == before, "plugin must not write a note"
 # the 🔌 alias, and from a topic with no workspace (it is never project-scoped)
 assert daemon.process_message(mk(text="🔌", message_thread_id=77, mid=26), cfg, reg, api) == "plugin report sent"
@@ -364,7 +364,7 @@ cmd, cwd, base, track = applies[-1]
 assert cwd == plugdir and base.startswith("retro-apply."), (cwd, base)
 assert cmd[0] == "claude" and "--dangerously-skip-permissions" in cmd
 assert "=== PROPOSAL ===" in cmd[2] and "a new pattern" in cmd[2], "prompt must embed the proposal"
-assert "machines-at-work plugin repo" in cmd[2], "prompt must be the retro-implement instructions"
+assert "intentpipe plugin repo" in cmd[2], "prompt must be the retro-implement instructions"
 assert track["report_tail"] is True, track  # the PR URL surfaces on completion
 assert any("applying" in t for _, t in api.sent), api.sent
 daemon.spawn_detached = lambda cmd, cwd, base, track=None: spawns.append((cmd, cwd, base)) or 4242
@@ -573,14 +573,14 @@ import json, os, sys
 orch, tmp = sys.argv[1], sys.argv[2]
 home = os.path.join(tmp, "porch"); os.makedirs(home)
 # three projects: one enables the plugin, one turned it off, one never had the entry
-for name, settings in (("on", {"machines-at-work@machines-at-work": True}),
-                       ("off", {"machines-at-work@machines-at-work": False}),
+for name, settings in (("on", {"intentpipe@intentpipe": True}),
+                       ("off", {"intentpipe@intentpipe": False}),
                        ("none", None)):
-    root = os.path.join(tmp, "p-" + name); os.makedirs(os.path.join(root, "machines-at-work"))
+    root = os.path.join(tmp, "p-" + name); os.makedirs(os.path.join(root, "intentpipe"))
     if settings is not None:
         os.makedirs(os.path.join(root, ".claude"))
         json.dump({"enabledPlugins": settings}, open(os.path.join(root, ".claude", "settings.json"), "w"))
-json.dump({str(i): {"name": n, "workspace": os.path.join(tmp, "p-" + n, "machines-at-work")}
+json.dump({str(i): {"name": n, "workspace": os.path.join(tmp, "p-" + n, "intentpipe")}
            for i, n in enumerate(("on", "off", "none"))},
           open(os.path.join(home, "registry.json"), "w"))
 os.environ["ORCH_HOME"] = home
@@ -639,8 +639,8 @@ set_installed("1.4.0")
 rep = run(check=True, explicit_source="/nonexistent")
 assert "cannot tell" in rep and "✅ current" not in rep, rep
 
-# no source at all (no marketplace, no MAW_SCRIPTS) → one honest line, no crash
-json.dump({}, open(plugin.MARKETPLACES, "w")); os.environ.pop("MAW_SCRIPTS", None)
+# no source at all (no marketplace, no INTENTPIPE_SCRIPTS) → one honest line, no crash
+json.dump({}, open(plugin.MARKETPLACES, "w")); os.environ.pop("INTENTPIPE_SCRIPTS", None)
 assert "no plugin source found" in run(check=True)
 PY
 echo "[smoke] plugin.py ok"
@@ -701,7 +701,7 @@ assert on("be") == "dev" and on("fe") == "dev", "an option that can't apply in f
 PY
 echo "[smoke] checkout.py build ok"
 
-# --- checkout.py --refresh: the automatic side of the same flow — a machines-at-work
+# --- checkout.py --refresh: the automatic side of the same flow — a intentpipe
 # task lands, `done` puts every repo back on the default branch, and this points the
 # preview back at the branch that was just developed. Guards the three things that
 # make it usable unattended: a branch only one repo has leaves the other on default
@@ -714,7 +714,7 @@ orch, tmp = sys.argv[1], sys.argv[2]
 sys.path.insert(0, os.path.join(orch, "system-scripts"))
 import checkout, status
 
-root = os.path.join(tmp, "rf"); ws = os.path.join(root, "machines-at-work"); os.makedirs(ws)
+root = os.path.join(tmp, "rf"); ws = os.path.join(root, "intentpipe"); os.makedirs(ws)
 # the registry is the source of the project's name and topic (as for the daemon):
 # `relaunch` is addressed by name, and the refresh reports into that topic
 status.REGISTRY = os.path.join(tmp, "rf-registry.json")

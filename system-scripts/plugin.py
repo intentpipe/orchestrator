@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Update the machines-at-work plugin install and report the version each project runs.
+"""Update the intentpipe plugin install and report the version each project runs.
 
 The trap this closes: the plugin's **skills** run from a version-pinned install
 cache (`~/.claude/plugins/cache/...`), while only its `scripts/` run live via
-MAW_SCRIPTS. A version bump in the source tree that is never reinstalled leaves
+INTENTPIPE_SCRIPTS. A version bump in the source tree that is never reinstalled leaves
 every project's headless skill run (plan/build/unblock) executing a STALE copy —
 the cache once sat at 0.19.0, predating the `unblock` skill entirely, so 🩹
 invoked a skill that wasn't installed. `daemon.sync_plugin` does this reinstall
@@ -36,8 +36,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import status  # reuse _projects and _git — one source of fleet truth
 import pull    # reuse _pull_one — one source of the "never clobber a dirty tree" rule
 
-PLUGIN_ID = "machines-at-work@machines-at-work"
-MARKETPLACE = "machines-at-work"
+PLUGIN_ID = "intentpipe@intentpipe"
+MARKETPLACE = "intentpipe"
 CLAUDE_HOME = os.path.expanduser("~/.claude")
 INSTALLED = os.path.join(CLAUDE_HOME, "plugins", "installed_plugins.json")
 MARKETPLACES = os.path.join(CLAUDE_HOME, "plugins", "known_marketplaces.json")
@@ -55,14 +55,14 @@ def _load_json(path):
 
 def source_dir(explicit=None):
     """Where the plugin is authored. The marketplace is registered as a directory,
-    so its installLocation IS the source tree; MAW_SCRIPTS (the daemon's handle on
+    so its installLocation IS the source tree; INTENTPIPE_SCRIPTS (the daemon's handle on
     the same repo) is the fallback for a box that registered it differently."""
     if explicit:
         return explicit
     loc = _load_json(MARKETPLACES).get(MARKETPLACE, {}).get("installLocation")
     if loc and os.path.isdir(loc):
         return loc
-    scripts = os.environ.get("MAW_SCRIPTS")
+    scripts = os.environ.get("INTENTPIPE_SCRIPTS")
     return os.path.dirname(scripts.rstrip("/")) if scripts else None
 
 
@@ -109,10 +109,10 @@ def _enabled_in(root):
 
 def build_report(check=False, do_pull=False, explicit_source=None):
     """Update (unless --check) and render the report. Text output is the Telegram post."""
-    lines = ["🔌 machines-at-work plugin", ""]
+    lines = ["🔌 intentpipe plugin", ""]
     src = source_dir(explicit_source)
     if not src:
-        return "\n".join(lines + ["⚠️ no plugin source found — register the marketplace or set MAW_SCRIPTS"])
+        return "\n".join(lines + ["⚠️ no plugin source found — register the marketplace or set INTENTPIPE_SCRIPTS"])
 
     if do_pull:
         _, res = pull._pull_one(src)  # dirty/diverged is skipped and said, never clobbered
@@ -155,7 +155,7 @@ def build_report(check=False, do_pull=False, explicit_source=None):
         lines.append("(no registered projects)")
     width = max((len(p["name"]) for p in projects), default=0)
     for p in projects:
-        root = os.path.dirname(p["workspace"].rstrip("/"))  # workspace = <root>/machines-at-work
+        root = os.path.dirname(p["workspace"].rstrip("/"))  # workspace = <root>/intentpipe
         enabled, where = _enabled_in(root)
         if enabled:
             note = f"{running} ✅" + ("" if where == "settings.json" else f" (via {where})")

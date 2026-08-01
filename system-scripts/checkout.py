@@ -404,12 +404,9 @@ def refresh(workspace, branch=None):
     wants is the LAST branch developed, which the queued round re-picks when it
     runs — not one rebuild per task, three deep."""
     workspace = os.path.normpath(workspace)
-    if not os.path.exists(os.path.join(workspace, "agents.env")):
-        # given the project root; machines-at-work/ is the pre-rename name
-        for child in ("intentpipe", "machines-at-work"):
-            if os.path.exists(os.path.join(workspace, child, "agents.env")):
-                workspace = os.path.join(workspace, child)
-                break
+    if not os.path.exists(os.path.join(workspace, "agents.env")) \
+            and os.path.exists(os.path.join(workspace, "intentpipe", "agents.env")):
+        workspace = os.path.join(workspace, "intentpipe")   # given the project root
     name = options_for(workspace)["name"]
     os.makedirs(RUN_DIR, exist_ok=True)
     pidfile = os.path.join(RUN_DIR, f"{name}.checkout.pid")

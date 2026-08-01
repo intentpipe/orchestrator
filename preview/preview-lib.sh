@@ -40,6 +40,17 @@
 #   TMPDIR         override (Flutter's web compiler overflows the small /tmp tmpfs)
 #   pre_build      shell function; if defined, run before each build (validation)
 #   BACKEND_WAIT   1 = `docker compose up --wait` (needs healthchecks); default 0
+# ── Backend hooks (redefine AFTER sourcing for a non-docker backend) ────────
+# The docker-compose backend lives behind four functions; a project whose
+# backend is a plain host process (quorum's uv/uvicorn core) redefines them
+# between `source preview-lib.sh` and `preview_main "$@"`:
+#   start_backend    bring the backend up (owns the BACKEND_RESET_VOLUMES /
+#                    BACKEND_FORCE_RECREATE semantics — or ignores them when
+#                    the project has no volumes to reset)
+#   stop_backend     stop it (`down`)
+#   backend_running  exit 0 iff it is genuinely serving (the watermark's
+#                    "is the running preview whole?" check)
+#   backend_status   human-readable state block (`status`)
 # ── Env knobs a CALLER sets (not project config) ────────────────────────────
 #   BACKEND_FORCE_RECREATE=1  recreate containers even when image+config match
 #   BACKEND_RESET_VOLUMES=1   `down -v` first: the branch's migrations replay
@@ -117,6 +128,12 @@ start_backend() {
   echo "[backend] docker compose up -d --build ${extra[*]} ($PROJECT)"
   (cd "$BACKEND_DIR" && DC up -d --build "${extra[@]}")
 }
+
+# The remaining docker defaults behind the backend hooks (see header — all four
+# are overridable by a project with a non-compose backend).
+stop_backend()    { (cd "$BACKEND_DIR" && DC stop); }
+backend_running() { [ -n "$( (cd "$BACKEND_DIR" && DC ps -q --status running) 2>/dev/null)" ]; }
+backend_status()  { (cd "$BACKEND_DIR" && DC ps) || true; }
 
 # `flutter pub get` ends every run with a ~100-line "_fe_analyzer_shared 93.0.0
 # (105.0.0 available) … 97 packages have newer versions incompatible with
@@ -233,7 +250,7 @@ preview_current() {
   # Both halves must actually be serving: a live bundle in front of a stopped
   # backend is not "current", it's half a preview.
   if ! is_up "$STATE_DIR/web-serve.pid"; then return 1; fi
-  if [ -z "$( (cd "$BACKEND_DIR" && DC ps -q --status running) 2>/dev/null)" ]; then return 1; fi
+  if ! backend_running; then return 1; fi
   local now; now=$(_watermark_now)
   # A dirty tree has no stable identity — same sha, different content — so it is
   # never current; someone editing in place still gets their build.
@@ -252,7 +269,7 @@ cmd_up() {
   fi
   start_backend; stop_frontend; sleep 1; build_frontend; serve_frontend; write_watermark; echo; cmd_urls
 }
-cmd_down()    { stop_frontend; (cd "$BACKEND_DIR" && DC stop); }
+cmd_down()    { stop_frontend; stop_backend; }
 # restart/rebuild are the explicit "build it again" commands — they never consult
 # the watermark, they refresh it.
 cmd_restart() { stop_frontend; sleep 1; build_frontend; serve_frontend; write_watermark; cmd_urls; }
@@ -418,7 +435,7 @@ cmd_branches() {
 }
 
 cmd_status() {
-  echo "=== docker ==="; (cd "$BACKEND_DIR" && DC ps) || true
+  echo "=== backend ==="; backend_status
   echo; echo "=== frontend ==="
   if is_up "$STATE_DIR/web-serve.pid"; then echo "  static server: up (pid $(cat "$STATE_DIR/web-serve.pid"))"
   elif port_busy "$FRONTEND_PORT"; then echo "  static server: up (untracked — run 'restart' to adopt)"

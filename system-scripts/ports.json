@@ -7,5 +7,9 @@
   "tell-your-friends": {
     "backend": { "port": 8800, "health": "/readyz", "url": "https://tyf-api.squadrafrizzante.com", "repo": "core" },
     "frontend": { "port": 3030, "health": "/", "url": "https://tyf.squadrafrizzante.com", "repo": "app_mobile" }
+  },
+  "quorum": {
+    "backend": { "port": 8820, "health": "/healthz", "url": "https://quorum-api.squadrafrizzante.com", "repo": "core" },
+    "frontend": { "port": 3032, "health": "/", "url": "https://quorum.squadrafrizzante.com", "repo": "app" }
   }
 }

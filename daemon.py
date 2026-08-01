@@ -125,9 +125,7 @@ DECISION_OFFERS_FILE = os.path.join(RUN_DIR, "decision_offers.json")
 # copy. sync_plugin() reinstalls when the source version moved, before a dispatch.
 INTENTPIPE_PLUGIN_ID = "intentpipe@intentpipe"
 INTENTPIPE_MARKETPLACE = "intentpipe"
-# Workspace state dir, newest first. machines-at-work/ is the pre-rename name,
-# still accepted so a project can be renamed on its own schedule.
-WORKSPACE_DIRS = ("intentpipe", "machines-at-work")
+WORKSPACE_DIRS = ("intentpipe",)
 INSTALLED_PLUGINS = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
 
 # Ceiling for a General `claude -p` run. It parks the poll loop meanwhile (same

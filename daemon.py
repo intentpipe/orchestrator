@@ -1062,6 +1062,66 @@ def _log_report(path, lines=None):
     return tail or "(no output)", rejected
 
 
+class _AdoptedProc:
+    """Popen stand-in for a run inherited from a previous daemon. Its pidfile gives
+    us the pid but not a handle, so there is no wait status to collect: poll() is
+    None while it lives and 0 once it is gone, and reap_jobs says "exit status
+    unknown" rather than claiming a ✅ it cannot actually know."""
+
+    def __init__(self, pid, pidfile):
+        self.pid, self._pidfile = pid, pidfile
+
+    def poll(self):
+        return None if pid_alive(self._pidfile) else 0
+
+
+def adopt_orphan_runs():
+    """Reconcile RUN_DIR's pidfiles with reality before the poll loop starts.
+
+    _JOBS lives only in memory, so a restart used to lose every handle while the
+    pidfiles stayed on disk — systemd's "Found left-over process … in control
+    group while starting unit", same pid across three restarts on 2026-08-01. The
+    unit's KillMode now tears the cgroup down on stop, but a crash or a bare
+    `kill` of the daemon still leaves children behind, so startup reconciles
+    rather than assumes: a live pid is re-registered for reap_jobs to report on
+    (its pidfile stays put, so project_busy keeps holding the per-project lock), a
+    dead one has its stale pidfile cleared — left there it would refuse every
+    future trigger for that project with "already running".
+
+    Returns (adopted, cleared) description lists for the caller to log: a silent
+    reconcile would be invisible to logmine, which reads this journal."""
+    adopted, cleared = [], []
+    try:
+        entries = sorted(os.listdir(RUN_DIR))
+    except OSError:
+        return adopted, cleared   # no run dir yet — nothing has ever been spawned
+    topics = {e["name"]: int(t) for t, e in load_registry().items()}
+    for fn in entries:
+        if not fn.endswith(".pid"):
+            continue
+        path = os.path.join(RUN_DIR, fn)
+        base = fn[:-len(".pid")]
+        if not pid_alive(path):
+            try:
+                os.remove(path)
+                cleared.append(base)
+            except OSError as e:
+                log(f"could not clear stale pidfile {fn} (non-fatal): {e}")
+            continue
+        # spawn_detached's base is "<project>.<action>"; logmine implements invert
+        # that as "logmine.<slug>" (the slug names the run, logmine is the verb).
+        head, _, tail = base.partition(".")
+        name, action = (tail, "logmine") if head == "logmine" else (head, tail)
+        try:
+            pid = int(open(path).read().strip())
+        except (OSError, ValueError):
+            continue   # raced with the run's own exit; the next sweep clears it
+        _JOBS.append({"popen": _AdoptedProc(pid, path), "log": os.path.join(RUN_DIR, base + ".log"),
+                      "name": name, "action": action, "topic": topics.get(name), "adopted": True})
+        adopted.append(f"{base} (pid {pid})")
+    return adopted, cleared
+
+
 def reap_jobs(cfg, api):
     """Poll tracked detached runs; when one finishes, reap it (no zombies) and post
     the outcome into its topic — a concise ✅ on success, a 😱 with the log tail on
@@ -1088,11 +1148,17 @@ def reap_jobs(cfg, api):
                 f"last lines of {os.path.basename(j['log'])}:\n{detail}")
         else:
             done = f"✅ {j['action']} for {j['name']} finished."
-            if j.get("report_tail"):   # e.g. logmine implement — surface the PR URL
+            if j.get("adopted"):   # inherited pid, no wait status — say so, and let the tail carry the outcome
+                done = (f"☑️ {j['action']} for {j['name']} finished — adopted after a daemon "
+                        f"restart, so its exit status is unknown:\n\n{tail}")
+            elif j.get("report_tail"):   # e.g. logmine implement — surface the PR URL
                 done += f"\n\n{tail}"
             api.send_message(cfg["chat_id"], done, j.get("topic"))
-            log(f"{j['action']} for {j['name']} finished ok")
-            if j.get("action") == "retro":   # post the run's new reports, react-to-apply
+            log(f"{j['action']} for {j['name']} finished"
+                + (" (adopted, exit status unknown)" if j.get("adopted") else " ok"))
+            # An adopted retro has no retro_before, so every pre-existing report would
+            # read as new — skip the offers rather than re-post the whole directory.
+            if j.get("action") == "retro" and "retro_before" in j:   # post the run's new reports, react-to-apply
                 try:
                     log(offer_retro_proposals(j, cfg, api))
                 except Exception as e:
@@ -1341,6 +1407,13 @@ def build_config(env):
 def run(once=False):
     cfg = build_config(load_env(ENV_FILE))
     api = TelegramAPI(cfg["token"])
+    # Reconcile the pidfiles a previous daemon left BEFORE any topic can trigger a
+    # run: a stale one refuses every new plan, a live one must be tracked again.
+    adopted, cleared = adopt_orphan_runs()
+    if adopted:
+        log(f"adopted {len(adopted)} run(s) still in flight from a previous daemon: {', '.join(adopted)}")
+    if cleared:
+        log(f"cleared {len(cleared)} stale pidfile(s): {', '.join(cleared)}")
     log(f"up · {len(load_registry())} topic(s) registered · allowlist {sorted(cfg['allowlist'])}")
     offset = read_offset()
     backoff = POLL_BACKOFF_MIN

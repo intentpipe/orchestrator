@@ -331,6 +331,61 @@ assert any(t.startswith("😱 plan for blockedproj") and "blocked" in t for t in
 assert len(texts) == 3, texts  # the running job posted nothing
 daemon._JOBS[:] = []
 
+# reap_jobs: a signal death is a KILL, not a crash — rc=143 (shell 128+15) and a
+# raw Popen -9 both name the signal under ⚠️ instead of the 😱 crash banner.
+api = FakeAPI()
+daemon._JOBS[:] = [dict(_job("sigproj", 143, "Plan posted\nExecution error")),
+                   dict(_job("kill9proj", -9, "half a log"))]
+daemon.reap_jobs(cfg, api)
+texts = [t for _, t in api.sent]
+assert any(t.startswith("⚠️ plan for sigproj was killed by SIGTERM") for t in texts), texts
+assert any(t.startswith("⚠️ plan for kill9proj was killed by SIGKILL") for t in texts), texts
+assert not any(t.startswith("😱") for t in texts), texts
+
+# reap_jobs: a loop that exits 5 (usage limit outlived its in-run retries) is
+# PARKED — ⏸️ with the relaunch time, no 😱 — and booked in _RESUMES.
+api = FakeAPI()
+daemon._RESUMES.clear()
+limitjob = {**_job("proj", 5, "── stopped: usage limit on 0130 still not cleared"), "action": "loop"}
+daemon._JOBS[:] = [dict(limitjob)]
+daemon.reap_jobs(cfg, api)
+texts = [t for _, t in api.sent]
+assert any(t.startswith("⏸️ loop for proj") and "1/3" in t for t in texts), texts
+assert not any(t.startswith("😱") for t in texts), texts
+assert daemon._RESUMES["proj"]["attempts"] == 1 and daemon._RESUMES["proj"]["at"], daemon._RESUMES
+
+# launch_due_resumes: nothing before the window; once due, the loop is
+# redispatched and the entry is kept (at=None) so a repeat limit-death counts up.
+spawns = []
+daemon.spawn_detached = lambda cmd, cwd, base, track=None: spawns.append(base) or 4242
+daemon.sync_plugin = lambda cfg: None
+daemon.load_registry = lambda: reg
+daemon.launch_due_resumes(cfg, api)
+assert not spawns, "must not relaunch before the window passes"
+daemon._RESUMES["proj"]["at"] = 1   # window long past
+daemon.launch_due_resumes(cfg, api)
+assert spawns == ["proj.loop"], spawns
+assert daemon._RESUMES["proj"]["at"] is None and daemon._RESUMES["proj"]["attempts"] == 1
+daemon.launch_due_resumes(cfg, api)
+assert spawns == ["proj.loop"], "a spent entry must not redispatch every cycle"
+# the relaunched loop dies on the limit again → attempt 2; a non-limit exit wipes
+# the budget; and once the budget is spent, rc=5 falls through to the 😱 path.
+daemon._JOBS[:] = [dict(limitjob)]
+daemon.reap_jobs(cfg, api)
+assert daemon._RESUMES["proj"]["attempts"] == 2, daemon._RESUMES
+daemon._JOBS[:] = [{**dict(limitjob), "popen": FakePopen(0),
+                    "log": _job("proj", 0, "5 tasks done")["log"]}]
+daemon.reap_jobs(cfg, api)
+assert "proj" not in daemon._RESUMES, "a clean loop exit must reset the resume budget"
+api = FakeAPI()
+daemon._RESUMES["proj"] = {"at": None, "topic": 5, "attempts": 3}
+daemon._JOBS[:] = [dict(limitjob)]
+daemon.reap_jobs(cfg, api)
+texts = [t for _, t in api.sent]
+assert any(t.startswith("😱 loop for proj exited with code 5") for t in texts), texts
+assert "proj" not in daemon._RESUMES, "an exhausted budget clears the entry"
+daemon._JOBS[:] = []
+
 # a finished retro run posts each NEW report under <workspace>/retro/ as its own
 # react-to-apply offer — pre-existing reports (retro_before) stay silent
 daemon.RETRO_OFFERS_FILE = os.path.join(daemon.RUN_DIR, "retro_offers.json")

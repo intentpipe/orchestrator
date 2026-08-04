@@ -155,6 +155,16 @@ ORPHAN_SWEEP_EVERY = int(os.environ.get("ORPHAN_SWEEP_EVERY", 600))
 POLL_BACKOFF_MIN = 5
 POLL_BACKOFF_MAX = 120
 
+# loop.sh exits 5 when a usage limit outlived its bounded in-run retries (6×~30m
+# by default). That limit clears on a timer, so the queue's death is temporary —
+# but until now rc=5 was reported as a generic FAILED and the queue stayed dead
+# until a human typed 🚀 (bibbles lost task 0130's whole queue this way). The
+# daemon instead parks the loop and relaunches it after LIMIT_RESUME_SECS, up to
+# LIMIT_RESUME_MAX consecutive times before conceding to the human.
+LOOP_LIMIT_RC = 5
+LIMIT_RESUME_SECS = int(os.environ.get("LIMIT_RESUME_SECS", 3600))
+LIMIT_RESUME_MAX = int(os.environ.get("LIMIT_RESUME_MAX", 3))
+
 # Exact-match trigger tokens (Decision #10). Matching is on the stripped,
 # case-folded message text — "plan" inside a sentence never fires.
 TRIGGERS = {"🧠": "plan", "plan": "plan", "🚀": "loop", "build-all": "loop",
@@ -1122,6 +1132,71 @@ def adopt_orphan_runs():
     return adopted, cleared
 
 
+# Loops parked on a usage limit, awaiting relaunch: name -> {at, topic, attempts}.
+# In-memory like _JOBS: a daemon restart forgets the schedule, which is safe —
+# the human was already told the loop stopped when it was first parked.
+_RESUMES = {}
+
+
+def _schedule_limit_resume(j, cfg, api):
+    """Park a loop that exited LOOP_LIMIT_RC and book its relaunch. Returns False
+    once LIMIT_RESUME_MAX consecutive limit-deaths spent the budget — the limit
+    evidently outlives any window worth polling, so the generic failure path
+    should tell the human instead."""
+    n = _RESUMES.get(j["name"], {}).get("attempts", 0) + 1
+    if n > LIMIT_RESUME_MAX:
+        _RESUMES.pop(j["name"], None)
+        return False
+    at = time.time() + LIMIT_RESUME_SECS
+    _RESUMES[j["name"]] = {"at": at, "topic": j.get("topic"), "attempts": n}
+    when = time.strftime("%H:%M UTC", time.gmtime(at))
+    api.send_message(cfg["chat_id"],
+                     f"⏸️ loop for {j['name']} stopped on a persistent usage limit — "
+                     f"relaunching at {when} (attempt {n}/{LIMIT_RESUME_MAX})", j.get("topic"))
+    log(f"loop for {j['name']} hit the usage limit (rc={LOOP_LIMIT_RC}); "
+        f"relaunch scheduled at {when} ({n}/{LIMIT_RESUME_MAX})")
+    return True
+
+
+def launch_due_resumes(cfg, api):
+    """Relaunch loops whose _RESUMES window has passed. Called once per poll cycle.
+    A launch marks the entry spent-but-kept (at=None): if the relaunched loop dies
+    on the limit again, _schedule_limit_resume finds the attempt count; any other
+    outcome clears the entry in reap_jobs."""
+    now = time.time()
+    entries = {e["name"]: e for e in load_registry().values()}
+    for name, r in list(_RESUMES.items()):
+        if r["at"] is None or r["at"] > now:
+            continue
+        r["at"] = None
+        entry = entries.get(name)
+        if entry is None:
+            _RESUMES.pop(name, None)
+            log(f"limit resume for {name} dropped: no longer registered")
+            continue
+
+        def fail(reason, reply, name=name, topic=r["topic"]):
+            api.send_message(cfg["chat_id"], f"⚠️ auto-relaunch for {name}: {reply}", topic)
+            return reason
+
+        log("limit resume: " + dispatch("loop", entry, cfg, api, r["topic"],
+                                        react=lambda emoji: None, fail=fail))
+
+
+def _kill_signal(rc):
+    """Name of the signal that killed a child, or None for a plain exit. Popen
+    reports a signal death as a negative rc; a child that is itself a shell (or
+    claude) folds it into the shell convention 128+N instead — rc=143 in the
+    journal was SIGTERM'd work being filed as a crash."""
+    n = -rc if rc < 0 else rc - 128 if rc > 128 else 0
+    if n <= 0:
+        return None
+    try:
+        return signal.Signals(n).name
+    except ValueError:
+        return f"signal {n}"
+
+
 def reap_jobs(cfg, api):
     """Poll tracked detached runs; when one finishes, reap it (no zombies) and post
     the outcome into its topic — a concise ✅ on success, a 😱 with the log tail on
@@ -1134,17 +1209,31 @@ def reap_jobs(cfg, api):
             still.append(j)
             continue
         tail, rejected = _log_report(j["log"])
+        if j.get("action") == "loop" and rc != LOOP_LIMIT_RC:
+            _RESUMES.pop(j["name"], None)   # any non-limit outcome resets the budget
         if rc != 0 or rejected:
-            why = f"exited with code {rc}" if rc != 0 else "was blocked — a tool or command was rejected"
+            if j.get("action") == "loop" and rc == LOOP_LIMIT_RC \
+                    and _schedule_limit_resume(j, cfg, api):
+                continue   # parked, not failed — the ⏸️ message carries the outcome
+            sig = _kill_signal(rc)
+            if sig:
+                # A kill is not a crash: rc=143 once buried a fully-posted plan
+                # under the same 😱 banner as a real failure. Name the signal and
+                # let the tail show how far the run got.
+                why = f"was killed by {sig}"
+            else:
+                why = f"exited with code {rc}" if rc != 0 else "was blocked — a tool or command was rejected"
             api.send_message(cfg["chat_id"],
-                             f"😱 {j['action']} for {j['name']} {why}:\n\n{tail}", j.get("topic"))
+                             f"{'⚠️' if sig else '😱'} {j['action']} for {j['name']} {why}:\n\n{tail}",
+                             j.get("topic"))
             # The tail goes to the JOURNAL too, not just Telegram. A bare
             # "FAILED (rc=1)" is unreadable months later and — more to the point —
             # logmine reads this journal, so a failure with no context is a failure
             # it can never propose a fix for. Indented so the multi-line tail stays
             # visually attached to its "[daemon] … FAILED" line.
             detail = "\n".join("    " + ln for ln in _log_report(j["log"], 20)[0].splitlines())
-            log(f"{j['action']} for {j['name']} FAILED (rc={rc}, rejected={rejected}); "
+            label = f"KILLED by {sig} (rc={rc})" if sig else f"FAILED (rc={rc}, rejected={rejected})"
+            log(f"{j['action']} for {j['name']} {label}; "
                 f"last lines of {os.path.basename(j['log'])}:\n{detail}")
         else:
             done = f"✅ {j['action']} for {j['name']} finished."
@@ -1457,6 +1546,10 @@ def run(once=False):
             reap_jobs(cfg, api)
         except Exception as e:
             log(f"reap_jobs error: {e}")
+        try:  # relaunch any loop parked on a usage limit whose window has passed
+            launch_due_resumes(cfg, api)
+        except Exception as e:
+            log(f"limit resume error: {e}")
         if time.time() - last_sweep >= ORPHAN_SWEEP_EVERY:
             last_sweep = time.time()
             for pid, comm, age in sweep_orphans():

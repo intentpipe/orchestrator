@@ -10,10 +10,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Only kill the daemon itself on stop/restart — NOT its detached children. The
-# default (control-group) SIGKILLs the whole cgroup, which would abort an in-flight
-# plan/loop/relaunch every time the daemon restarts.
-KillMode=process
+# Take the detached children down WITH the daemon. Sparing them (KillMode=process)
+# kept an in-flight plan/loop alive across a restart, but the new daemon had no
+# handle on it: systemd logged "Unit process 1424274 (python3) remains running
+# after unit stopped" and then "Found left-over process 3914986 (python3) in
+# control group while starting unit" for the SAME pid across three restarts, while
+# the orphan kept writing to the workspace. An aborted run the user is told about
+# beats a second run touching the same repo. TERM first so claude can finish its
+# turn and flush, KILL only for whatever is still there after TimeoutStopSec.
+KillMode=control-group
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+TimeoutStopSec=30
 # claude (and other user-installed tools) live in ~/.local/bin, which the systemd
 # service PATH omits — add it so the daemon can spawn `claude` for 🧠/🚀/General.
 Environment=PATH=%h/.local/bin:/opt/flutter/bin:/usr/local/bin:/usr/bin:/bin

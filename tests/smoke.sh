@@ -497,6 +497,78 @@ assert daemon._log_report(logp)[0].endswith("line 59")   # byte-budget form unch
 PY
 echo "[smoke] orphan sweep + backoff ok"
 
+# --- Startup pidfile reconcile. _JOBS is in-memory, so a restart used to lose every
+# handle while the pidfiles stayed on disk: a dead one wedged the project at
+# "already running" forever, a live one kept writing to the workspace unwatched.
+python3 - "$ORCH" "$TMP" <<'PY' || fail "adopt_orphan_runs checks failed"
+import json, os, subprocess, sys
+orch, tmp = sys.argv[1], sys.argv[2]
+sys.path.insert(0, orch)
+import daemon
+daemon.RUN_DIR = os.path.join(tmp, "adoptrun"); os.makedirs(daemon.RUN_DIR)
+ws = os.path.join(tmp, "aws"); os.makedirs(ws)
+daemon.REGISTRY = os.path.join(tmp, "adopt-registry.json")
+json.dump({"5": {"name": "proj", "workspace": ws}}, open(daemon.REGISTRY, "w"))
+
+def pidfile(base, pid, logtext=""):
+    open(os.path.join(daemon.RUN_DIR, base + ".pid"), "w").write(str(pid))
+    open(os.path.join(daemon.RUN_DIR, base + ".log"), "w").write(logtext)
+
+live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+dead = subprocess.Popen([sys.executable, "-c", "pass"]); dead.wait()
+try:
+    pidfile("proj.loop", live.pid, "task 3 of 5\n")
+    pidfile("proj.plan", dead.pid, "planned 3 tasks\n")   # stale: the lock nothing releases
+    pidfile("logmine.some-fix", live.pid, "https://github.com/x/y/pull/9\n")
+    daemon._JOBS[:] = []
+    adopted, cleared = daemon.adopt_orphan_runs()
+    assert cleared == ["proj.plan"], cleared
+    assert not os.path.exists(os.path.join(daemon.RUN_DIR, "proj.plan.pid")), "stale pidfile must be cleared"
+    assert len(adopted) == 2 and all(f"pid {live.pid}" in a for a in adopted), adopted
+    # The live pidfile STAYS — it is the per-project lock project_busy reads.
+    assert os.path.exists(os.path.join(daemon.RUN_DIR, "proj.loop.pid"))
+    assert daemon.project_busy("proj") == "loop", "an adopted run must still hold its project"
+    jobs = {j["name"]: j for j in daemon._JOBS}
+    assert jobs["proj"]["action"] == "loop" and jobs["proj"]["topic"] == 5, jobs["proj"]
+    # "logmine.<slug>" inverts the usual "<project>.<action>", and has no topic
+    assert jobs["some-fix"]["action"] == "logmine" and jobs["some-fix"]["topic"] is None, jobs["some-fix"]
+    assert all(j["popen"].poll() is None for j in daemon._JOBS), "a live run must not read as finished"
+
+    # Once it exits, reap_jobs reports it — but as ☑️ with the log tail, never a ✅:
+    # an inherited pid has no wait status, so success is not ours to claim.
+    class FakeAPI:
+        def __init__(self): self.sent = []
+        def send_message(self, chat, text, thread_id=None): self.sent.append((thread_id, text))
+    live.kill(); live.wait()   # Popen.wait reaps it; pid_alive also treats a zombie as gone
+    api = FakeAPI()
+    daemon.reap_jobs({"chat_id": "-100"}, api)
+    assert daemon._JOBS == [], daemon._JOBS
+    texts = [t for _, t in api.sent]
+    assert not any(t.startswith("✅") for t in texts), texts
+    loop_msg = next(t for t in texts if "loop for proj" in t)
+    assert loop_msg.startswith("☑️") and "exit status is unknown" in loop_msg, loop_msg
+    assert "task 3 of 5" in loop_msg, "the tail must carry what the exit code cannot"
+    assert any("pull/9" in t for t in texts), texts   # an adopted logmine still surfaces its PR
+finally:
+    live.kill(); live.wait()
+    daemon._JOBS[:] = []
+
+# A missing run dir is not an error — nothing has ever been spawned.
+daemon.RUN_DIR = os.path.join(tmp, "no-such-run")
+assert daemon.adopt_orphan_runs() == ([], []), "a missing RUN_DIR must degrade to a no-op"
+PY
+echo "[smoke] startup pidfile reconcile ok"
+
+# --- The service unit must take its children down with it: a detached run that
+# outlives `systemctl stop` is an orphan the next daemon cannot see or reap.
+unit="$ORCH/systemd/agent-orchestrator.service"
+grep -q '^KillMode=control-group$' "$unit" || fail "unit must set KillMode=control-group"
+! grep -q '^KillMode=process$' "$unit" || fail "KillMode=process leaks detached children across restarts"
+grep -q '^KillSignal=SIGTERM$' "$unit" || fail "unit must TERM before it kills"
+grep -q '^FinalKillSignal=SIGKILL$' "$unit" || fail "unit must SIGKILL what survives TERM"
+grep -q '^TimeoutStopSec=' "$unit" || fail "unit must bound how long a stop waits"
+echo "[smoke] service unit kill policy ok"
+
 # --- status.py builds a report from a stub registry + ports.json, and scopes to
 # one workspace when asked. No git repos / no live ports needed to exercise it.
 python3 - "$ORCH" "$TMP" <<'PY' || fail "status.py checks failed"

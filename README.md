@@ -317,10 +317,36 @@ that decision already pointed at.
 ## `system-scripts/`
 
 Server-wide, cross-project tooling that isn't the Telegram bridge itself: the `status`
-collector, the `pull-all` fast-forward puller, the `checkout` option enumerator/builder, and
-the `plugin` install updater/reporter
+collector, the `pull-all` fast-forward puller, the `checkout` option enumerator/builder,
+the `plugin` install updater/reporter, and the `tokens` spend reporter
 (all reuse `status.py`'s registry + agents.env + git walk). Anything the daemon exposes as a
 keyword-driven "act on the whole box" belongs here.
+
+## Keyword: `tokens` (💰)
+
+What the pipeline spent and where it went — `tokens`, `cost`, or 💰, optionally with a day
+count (`tokens 30`, capped at 90; default 7). In a **project topic** it scopes to that
+project; anywhere else it prices the whole box. Read-only and spawns nothing, so unlike the
+🧠/🚀/🩹 triggers it takes no pidfile and is safe to ask **while a build is running**.
+
+It reports per-day totals split **main loop vs subagents**, where the money goes (cache read
+/ write / output), cost per agent *run* by agent type, per-project totals, and the priciest
+individual runs. The one-line diagnosis matters more than the totals: when cache reads
+dominate, cost is `context × turns` and the fix is to shrink what enters context and prefer
+smaller tasks — not to reduce effort or ask for terser answers.
+
+The source is the transcripts Claude Code already writes, so this is measurement, not
+bookkeeping the pipeline has to maintain. Three things it gets right that a hand-rolled sum
+does not: **subagent transcripts live in `<session>/subagents/`**, not the parent file (miss
+them and you undercount a build day by roughly half); a repeated `requestId` is counted once
+(a `--resume` copies its predecessor's history forward); and a cache **write** is priced by
+TTL tier (2× base input at 1h, 1.25× at 5m) with reads at 0.1×, rather than treating every
+input token alike — which matters because ~95% of a build session is cached prefix.
+
+Dollar figures are **API-equivalent, not a bill**: a subscription has no per-token charge.
+They exist because one number that weights a cache read against an output token is the only
+way to compare two runs. Implementation: `system-scripts/tokens.py` (pure stdlib; also
+runnable from the shell, with `--json` for scripting).
 
 ## Keyword: `logmine`
 

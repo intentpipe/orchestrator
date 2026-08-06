@@ -85,6 +85,7 @@ STATUS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-script
 PULL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "pull.py")
 CHECKOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "checkout.py")
 PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "plugin.py")
+TOKENS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "tokens.py")
 RELAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "relaunch")
 # `relaunch` skips the rebuild when the preview already serves the checked-out
 # commits; `relaunch force` is the same keyword with that check turned off.
@@ -217,6 +218,10 @@ HELP = (
     "report the version each project runs (a stale cache means stale skills).\n"
     "• logmine — read the orchestrator's own logs since last time and post "
     "tooling-improvement proposals; react to one to implement it (branch + PR).\n"
+    "• 💰 or tokens (or `tokens 30` for a longer window) — what the pipeline "
+    "spent and where it went: per day, main loop vs subagents, cost per agent "
+    "run, and the priciest runs. In a project topic it scopes to that project. "
+    "Read-only, safe to run mid-build.\n"
     "• help — this message.\n"
     "\n"
     "In a project topic:\n"
@@ -427,6 +432,24 @@ def plugin_report(plugin_dir=None):
     if out.returncode != 0:
         return f"⚠️ plugin failed: {out.stderr.strip() or 'unknown error'}"
     return out.stdout.strip() or "(no plugin report)"
+
+
+def tokens_report(days=7, project=None):
+    """Price the Claude Code transcripts and report where the spend went;
+    tokens.py's stdout is the Telegram reply. Same synchronous shape as
+    status_report/plugin_report — it parks the poll loop, bounded by the
+    timeout, which the prefilter in tokens.py keeps to a couple of seconds.
+
+    Scoped by cwd, not by topic: a project's spend includes the subagent runs
+    the build loop spawned inside it, and those live under the project's own
+    transcript directory."""
+    cmd = [sys.executable, TOKENS, "--days", str(days), "--runs"]
+    if project:
+        cmd += ["--project", project]
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if out.returncode != 0:
+        return f"⚠️ tokens failed: {out.stderr.strip() or 'unknown error'}"
+    return out.stdout.strip() or "(no usage recorded)"
 
 
 def load_offers():
@@ -1378,6 +1401,22 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
         api.send_message(cfg["chat_id"], plugin_report(_maw_plugin_dir(cfg)), thread_id)
         react("👌")
         return "plugin report sent"
+
+    # `tokens` (or 💰 / `cost`, optionally + a day count): what the pipeline
+    # spent and where it went. Topic-aware like `status` — in a project topic it
+    # scopes to that project, elsewhere it prices the whole box. Read-only: it
+    # parses transcripts the CLI already wrote and spawns nothing, so unlike the
+    # TRIGGERS it needs no pidfile and can run while a loop is building. The
+    # word-count bound keeps a note that merely opens with "cost" a note.
+    _tok = stripped.split()
+    if _tok and _tok[0] in ("tokens", "cost", "💰") and (
+            len(_tok) == 1 or (len(_tok) == 2 and _tok[1].isdigit())):
+        days = min(int(_tok[1]), 90) if len(_tok) == 2 else 7
+        api.send_message(cfg["chat_id"],
+                         tokens_report(max(days, 1), entry["name"] if entry else None),
+                         thread_id)
+        react("👌")
+        return f"tokens report sent ({entry['name'] if entry else 'all'}, {days}d)"
 
     # `logmine`: box-level like status/pull-all — read the orchestrator's own logs
     # since the last run and post tooling-improvement proposals to react-to-implement.

@@ -772,6 +772,75 @@ assert "no plugin source found" in run(check=True)
 PY
 echo "[smoke] plugin.py ok"
 
+# --- tokens.py prices a stub transcript tree. The three things a naive reader
+# gets wrong are each pinned here: subagent transcripts live in a nested dir and
+# must be counted, a repeated requestId must NOT be, and a cache write is priced
+# by its TTL tier (1h = 2x base input, 5m = 1.25x) rather than as input tokens.
+python3 - "$ORCH" "$TMP" <<'PY' || fail "tokens.py checks failed"
+import datetime, json, os, sys
+orch, tmp = sys.argv[1], sys.argv[2]
+sys.path.insert(0, os.path.join(orch, "system-scripts"))
+import tokens
+
+root = os.path.join(tmp, "transcripts")
+sub = os.path.join(root, "proj-alpha", "sess1", "subagents")
+os.makedirs(sub)
+tokens.ROOT = root
+day = datetime.date.today().isoformat()
+
+def row(rid, usage, sidechain=False, cwd="/w/alpha", model="claude-opus-5", agent=None):
+    d = {"type": "assistant", "requestId": rid, "isSidechain": sidechain,
+         "timestamp": day + "T12:00:00.000Z", "cwd": cwd,
+         "message": {"model": model, "id": "msg_" + rid, "usage": usage}}
+    if agent:
+        d["attributionAgent"] = agent
+    return json.dumps(d)
+
+def usage(read=0, w1h=0, w5m=0, out=0, flat=0):
+    return {"input_tokens": 0, "cache_read_input_tokens": read, "output_tokens": out,
+            "cache_creation_input_tokens": w1h + w5m + flat,
+            **({"cache_creation": {"ephemeral_1h_input_tokens": w1h,
+                                   "ephemeral_5m_input_tokens": w5m}} if w1h or w5m else {})}
+
+# main: 1M cache reads = 1M * 0.10 * $5/M = $0.50 — written twice, counted once
+main = [row("r1", usage(read=1_000_000)), row("r1", usage(read=1_000_000)),
+        row("r9", usage(read=9_999_999), model="<synthetic>")]
+open(os.path.join(root, "proj-alpha", "sess1.jsonl"), "w").write("\n".join(main) + "\n")
+# subagent: 100k 1h-write = $1.00, 100k 5m-write = $0.625, 10k output = $0.25
+subrows = [row("s1", usage(w1h=100_000), True, agent="implementer"),
+           row("s2", usage(w5m=100_000), True, agent="implementer"),
+           row("s3", usage(out=10_000), True, agent="implementer")]
+open(os.path.join(sub, "agent-a1.jsonl"), "w").write("\n".join(subrows) + "\n")
+
+b, runs, dupes = tokens.collect(day)
+assert dupes == 1, f"repeated requestId not deduped: {dupes}"
+assert abs(b["all"].total - 2.375) < 1e-6, b["all"].total
+assert abs(b["all"].read - 0.50) < 1e-6, b["all"].read
+assert abs(b["all"].write - 1.625) < 1e-6, ("cache TTL tiers mispriced", b["all"].write)
+assert abs(b["all"].out - 0.25) < 1e-6, b["all"].out
+subtotal = sum(v.total for (_, k), v in b["kind_day"].items() if k == "sub")
+assert abs(subtotal - 1.875) < 1e-6, ("subagent transcripts missed", subtotal)
+assert list(b["project"]) == ["proj-alpha"], b["project"]
+assert len(runs) == 1 and list(runs.values())[0]["reqs"] == 3, runs
+assert abs(list(runs.values())[0]["cost"] - 1.875) < 1e-6, runs
+
+# a write with no TTL breakdown falls back to the 5m tier, not to zero
+b2, _, _ = tokens.collect(day)
+open(os.path.join(sub, "agent-a2.jsonl"), "w").write(
+    row("s4", usage(flat=100_000), True) + "\n")
+b3, _, _ = tokens.collect(day)
+assert abs((b3["all"].total - b2["all"].total) - 0.625) < 1e-6, b3["all"].total
+
+# --project matches on the session's cwd
+assert tokens.collect(day, "alpha")[0]["all"].reqs == b3["all"].reqs
+assert tokens.collect(day, "nope")[0]["all"].reqs == 0
+# a window that starts after the rows sees nothing
+future = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+assert tokens.collect(future)[0]["all"].reqs == 0
+assert "no Claude Code usage" in tokens.report(*tokens.collect(future)[:2], 7, None, False)
+PY
+echo "[smoke] tokens.py ok"
+
 # --- checkout.py --build: the branch-switch path the Telegram checkout flow runs.
 # Guards the mixed-checkout bug: a repo that can't be switched must ABORT the
 # rebuild (never serve a new frontend against the old backend), lockfile churn

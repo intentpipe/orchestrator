@@ -239,6 +239,24 @@ Mechanics (poll, download, transcribe, route, launch) are the script; *what a no
     store resolves from cwd, and spawning in `<root>/intentpipe` forked it away from interactive
     sessions (plugin proposal 2026-07-29-agent-memory-forks-by-cwd).
 
+17. **Spend is a keyword, not a memory — `💰`/`tokens` reprices the transcripts on demand (2026-08-06).**
+    *Objection:* loop.sh already records `Cost:` per task (plugin DESIGN #12) and /retro reads it — why a
+    second accounting? Because that field answers "what did task 0140 cost" and the question that actually
+    came up was "why am I burning my session limits", which no per-task field can answer: it needs the split
+    between main-loop and **subagent** spend, and subagent usage is not in the parent's transcript at all — it
+    lives in `<session>/subagents/*.jsonl`, so every hand-rolled reading of the transcripts had been
+    undercounting by roughly half. `system-scripts/tokens.py` prices what the CLI already wrote, and gets
+    three things right that a naive sum does not: it dedupes on `requestId` (a `--resume` copies its
+    predecessor's history forward, and one real subagent file held 336 rows for 192 requests), it prices cache
+    **writes** by TTL tier (2x base input at 1h, 1.25x at 5m) and reads at 0.1x rather than treating all input
+    alike, and it splits `isSidechain`. Shaped like `status`/`plugin` (#13): synchronous, read-only, parks the
+    poll loop for ~2s, topic-aware — a project topic scopes to that project, elsewhere it prices the box. No
+    pidfile and no project lock, because it spawns nothing and is safe to ask mid-build. Dollars are
+    API-equivalent, not a bill (a subscription has no per-token charge); they exist only because one number
+    that weights a cache read against an output token is the only way to compare two runs. The payoff is that
+    the next claim about spend is checked rather than remembered — the finding that motivated plugin DESIGN
+    #43 (70% cache reads, 5% output) is reproducible in a second.
+
 ## Phased build (each phase independently verifiable)
 - **Phase 1 — outbound leg (in-plugin, smallest, low-risk).** Extend `notify.sh`: creds set → `sendMessage`
   into `TELEGRAM_TOPIC_ID`. *Verify:* `notify.sh "hi"` from a project lands in its topic. Independently useful

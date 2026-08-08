@@ -25,6 +25,13 @@ TimeoutStopSec=30
 # claude (and other user-installed tools) live in ~/.local/bin, which the systemd
 # service PATH omits — add it so the daemon can spawn `claude` for 🧠/🚀/General.
 Environment=PATH=%h/.local/bin:/opt/flutter/bin:/usr/local/bin:/usr/bin:/bin
+# A systemd user unit never sources ~/.bashrc, so the interactive shell's
+# CLAUDE_CODE_OAUTH_TOKEN export never reached spawned `claude` children —
+# they fell back to the on-disk credentials, whose refresh token had gone
+# stale (2026-08-08, quorum loop: "OAuth session expired and could not be
+# refreshed" on every headless run). subprocess.Popen inherits the daemon's
+# environment, so setting it here covers every spawned claude/loop.sh.
+EnvironmentFile=%h/.agent-orchestrator/claude-auth.env
 # %h = the running user's home. Adjust if the checkout lives elsewhere.
 ExecStart=%h/intentpipe/orchestrator/daemon.py
 Restart=always

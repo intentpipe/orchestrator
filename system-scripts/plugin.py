@@ -83,6 +83,18 @@ def installed_entry():
     return next((e for e in entries if e.get("scope") == "user"), entries[0])
 
 
+def project_pin(root):
+    """A project-scoped install record for this root. It SHADOWS the user-scope
+    cache for every session started in the project — a reinstall bumps user
+    scope only, so the pin silently keeps that one project on the old version
+    (quorum sat on 0.41.0 this way while the report said 0.41.1 fleet-wide)."""
+    real = os.path.realpath(root)
+    for e in _load_json(INSTALLED).get("plugins", {}).get(PLUGIN_ID) or []:
+        if e.get("scope") == "project" and os.path.realpath(e.get("projectPath", "?")) == real:
+            return e
+    return None
+
+
 def _update_cache():
     """Refresh the marketplace, then reinstall the plugin — daemon.sync_plugin's two
     steps. Returns an error string, or None on success."""
@@ -157,7 +169,15 @@ def build_report(check=False, do_pull=False, explicit_source=None):
     for p in projects:
         root = os.path.dirname(p["workspace"].rstrip("/"))  # workspace = <root>/intentpipe
         enabled, where = _enabled_in(root)
-        if enabled:
+        pin = project_pin(root) if enabled else None
+        if pin and pin.get("version") != running:
+            note = (f"{pin.get('version') or '?'} ⚠️ project-scope pin shadows the {running} user install "
+                    f"— fix: cd {root} && claude plugin uninstall -s project --keep-data {PLUGIN_ID}, "
+                    f"then restore enabledPlugins in .claude/settings.json (uninstall clears it)")
+        elif pin:
+            note = (f"{running} ✅ but project-scope pinned — the NEXT reinstall will strand it; "
+                    f"remove the pin (claude plugin uninstall -s project --keep-data, then restore enabledPlugins)")
+        elif enabled:
             note = f"{running} ✅" + ("" if where == "settings.json" else f" (via {where})")
         elif enabled is False:
             note = "— ⚠️ disabled in .claude/" + where

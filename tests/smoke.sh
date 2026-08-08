@@ -734,6 +734,22 @@ assert "• on    1.2.0 ✅" in rep, rep
 assert "⚠️ disabled" in rep and "off" in rep, rep
 assert "not enabled" in rep, rep   # the project with no entry runs NO version, not "1.2.0"
 
+# a project-scope pin shadows the user cache: that project's line must show the
+# version IT actually runs — the pin — never the fleet's, and name the remedy
+def set_pinned(v):
+    json.dump({"plugins": {plugin.PLUGIN_ID: [
+        {"scope": "user", "version": "1.2.0", "installPath": cache},
+        {"scope": "project", "projectPath": os.path.join(tmp, "p-on"), "version": v, "installPath": cache}]}},
+        open(plugin.INSTALLED, "w"))
+set_pinned("1.1.0")
+rep = run(check=True)
+assert "• on    1.1.0 ⚠️ project-scope pin shadows the 1.2.0 user install" in rep, rep
+assert "uninstall -s project" in rep, rep
+set_pinned("1.2.0")  # even in-sync, a pin is a footgun: the next reinstall strands it
+rep = run(check=True)
+assert "1.2.0 ✅ but project-scope pinned" in rep, rep
+set_installed("1.2.0")  # back to the plain user-only record for the cases below
+
 # stale + --check: says so, names the source version, and changes NOTHING
 updates = []
 plugin._update_cache = lambda: updates.append(1)

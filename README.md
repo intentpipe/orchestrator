@@ -4,6 +4,12 @@ Cross-project control plane for the scaffold — **not** plugin code (the plugin
 this sits above all projects). Architecture + rationale: `DESIGN.md`.
 
 - `tg.sh` — Telegram helpers: discover a chat id, create a forum topic.
+- `claude-run.sh` — box-wide rate-limit safety net (box_spec.md §12 in the Dialectica
+  spec repo): the wrapper any new spawner (moderator, council runner, meta-agent pass,
+  cycle timer) calls instead of `claude` directly, so one usage limit on the shared
+  subscription pauses all of them instead of each burning its own retry budget in
+  ignorance of the others. See its own header comment for the full contract; sealed
+  end-to-end coverage in `tests/loop-smoke.sh`.
 
 ## One-time setup: the community + the `scaffold` topic
 

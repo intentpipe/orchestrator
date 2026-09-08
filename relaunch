@@ -53,17 +53,28 @@ reset_note=""
 # shellcheck disable=SC1090
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
 
-post() { # topic_id text
-  local topic="$1" text="$2"
+post() { # topic_id name text
+  local topic="$1" name="$2" text="$3"
   echo "[relaunch] -> topic $topic: $text"
   if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
-    echo "[relaunch] (no telegram creds; printed only)"; return
+    echo "[relaunch] (no telegram creds; printed only)"
+  else
+    curl -fsS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+      --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+      --data-urlencode "message_thread_id=$topic" \
+      --data-urlencode "text=$text" >/dev/null \
+      || echo "[relaunch] telegram send failed for topic $topic" >&2
   fi
-  curl -fsS "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-    --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
-    --data-urlencode "message_thread_id=$topic" \
-    --data-urlencode "text=$text" >/dev/null \
-    || echo "[relaunch] telegram send failed for topic $topic" >&2
+  # Task 0071: the same line, into Quorum's project chat — always project-
+  # scoped (a relaunch is never one task's), best-effort so a Quorum outage
+  # never affects the Telegram post above.
+  if [ -n "${QUORUM_CHAT_URL:-}" ] && [ -n "${QUORUM_PIPE_TOKEN:-}" ]; then
+    body="$(python3 -c 'import json,sys; print(json.dumps({"kind": "text", "text": sys.argv[1]}))' "$text")"
+    curl -fsS "${QUORUM_CHAT_URL%/}/v1/chat/projects/$name/messages" \
+      -H "Authorization: Bearer $QUORUM_PIPE_TOKEN" -H "Content-Type: application/json" \
+      --data-binary "$body" >/dev/null \
+      || echo "[relaunch] quorum send failed for $name" >&2
+  fi
 }
 
 # Emit "topic<TAB>name<TAB>workspace" rows from the registry (optionally filtered).
@@ -88,7 +99,7 @@ while IFS=$'\t' read -r topic name workspace; do
   echo "[relaunch] $name  (topic $topic, root $root)"
   if [ -z "$dev" ]; then
     echo "[relaunch] no *-dev.sh in $root — skipping"
-    post "$topic" "⚠️ $name: no dev script found, cannot relaunch."
+    post "$topic" "$name" "⚠️ $name: no dev script found, cannot relaunch."
     continue
   fi
 
@@ -149,16 +160,16 @@ while IFS=$'\t' read -r topic name workspace; do
 
   if [ -z "$url" ]; then
     echo "[relaunch] WARNING: no frontend URL captured for $name" >&2
-    post "$topic" "⚠️ $name relaunched but the frontend URL wasn't captured — check the server."
+    post "$topic" "$name" "⚠️ $name relaunched but the frontend URL wasn't captured — check the server."
     continue
   fi
   echo "[relaunch] $name frontend: $url"
   if [ "$skipped" = 1 ]; then
-    post "$topic" "✅ $name is already up to date — nothing rebuilt (relaunch --force to rebuild anyway)
+    post "$topic" "$name" "✅ $name is already up to date — nothing rebuilt (relaunch --force to rebuild anyway)
 
 $block"
   else
-    post "$topic" "🚀 $name relaunched$reset_note
+    post "$topic" "$name" "🚀 $name relaunched$reset_note
 
 $block"
   fi

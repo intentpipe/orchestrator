@@ -41,6 +41,7 @@ ORCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ORCH_DIR)
 import status  # reuse _projects, _parse_agents_env, _git — one source of fleet truth
+import quorum_report  # task 0071: fan every report below into Quorum too
 
 RELAUNCH = os.path.join(ORCH_DIR, "relaunch")
 RUN_DIR = os.path.join(status.ORCH_HOME, "run")
@@ -179,10 +180,12 @@ def _restore_lockfiles(path):
 
 
 def _post(offer, text):
-    """Say something in the project's topic. `checkout.py --build` runs DETACHED
-    from the daemon and is not job-tracked, so a failure it doesn't announce is
+    """Say something in the project's topic — and, task 0071, into Quorum's
+    chat for the same project. `checkout.py --build` runs DETACHED from the
+    daemon and is not job-tracked, so a failure it doesn't announce is
     invisible — the user just waits for a URL that never arrives. Best-effort:
     never let a comms problem break the build."""
+    quorum_report.report(offer.get("name"), text, workspace=offer.get("workspace"))
     try:
         import daemon  # noqa: PLC0415 — optional, and importing it must not be fatal
         env = daemon.load_env(daemon.ENV_FILE)

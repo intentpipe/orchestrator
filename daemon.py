@@ -75,6 +75,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import quorum_report
+
 ORCH_HOME = os.environ.get("ORCH_HOME", os.path.expanduser("~/.agent-orchestrator"))
 ENV_FILE = os.environ.get("TELEGRAM_ENV", os.path.join(ORCH_HOME, "telegram.env"))
 REGISTRY = os.path.join(ORCH_HOME, "registry.json")
@@ -911,7 +913,9 @@ def offer_retro_proposals(job, cfg, api):
     business — the daemon only routes the file."""
     new = [f for f in _retro_files(job["workspace"]) if f not in set(job.get("retro_before", []))]
     if not new:
-        api.send_message(cfg["chat_id"], "📋 retro: no new proposals this run.", job.get("topic"))
+        none_yet = "📋 retro: no new proposals this run."
+        api.send_message(cfg["chat_id"], none_yet, job.get("topic"))
+        quorum_report.report(job["name"], none_yet)
         return "retro: no new proposals"
     offers = load_retro_offers()
     for fname in new[:6]:
@@ -921,6 +925,7 @@ def offer_retro_proposals(job, cfg, api):
                 + (f"confidence: {conf}\n" if conf else "")
                 + f"\n{fname}\n\nReact to this message to apply it (branch + PR in the intentpipe repo).")
         resp = api.send_message(cfg["chat_id"], body, job.get("topic"))
+        quorum_report.report(job["name"], body, workspace=job.get("workspace"))
         mid = (resp or {}).get("result", {}).get("message_id")
         if mid is not None:
             offers[str(mid)] = {"file": path, "name": job["name"], "topic": job.get("topic")}
@@ -1336,9 +1341,9 @@ def reap_jobs(cfg, api):
                 why = f"was killed by {sig}"
             else:
                 why = f"exited with code {rc}" if rc != 0 else "was blocked — a tool or command was rejected"
-            api.send_message(cfg["chat_id"],
-                             f"{'⚠️' if sig else '😱'} {j['action']} for {j['name']} {why}:\n\n{tail}",
-                             j.get("topic"))
+            outcome = f"{'⚠️' if sig else '😱'} {j['action']} for {j['name']} {why}:\n\n{tail}"
+            api.send_message(cfg["chat_id"], outcome, j.get("topic"))
+            quorum_report.report(j["name"], outcome)
             # The tail goes to the JOURNAL too, not just Telegram. A bare
             # "FAILED (rc=1)" is unreadable months later and — more to the point —
             # logmine reads this journal, so a failure with no context is a failure
@@ -1356,6 +1361,7 @@ def reap_jobs(cfg, api):
             elif j.get("report_tail"):   # e.g. logmine implement — surface the PR URL
                 done += f"\n\n{tail}"
             api.send_message(cfg["chat_id"], done, j.get("topic"))
+            quorum_report.report(j["name"], done)
             log(f"{j['action']} for {j['name']} finished"
                 + (" (adopted, exit status unknown)" if j.get("adopted") else " ok"))
             # An adopted retro has no retro_before, so every pre-existing report would

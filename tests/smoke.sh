@@ -1324,4 +1324,166 @@ assert not any("pull" in c for c in seen), "a dirty checkout must not be pulled"
 PY
 echo "[smoke] plugin checkout freshen ok"
 
+# --- Quorum fan-out (task 0071): every Telegram post daemon.py (reap_jobs),
+# checkout.py and plugin.py make also reaches Quorum's chat — project chat by
+# default, the feature channel when the text names one that resolves on the
+# workspace, and never when config is absent or the endpoint refuses (best
+# effort, must not raise). A tiny fake chat server captures what was sent.
+cat > "$TMP/fakequorum.py" <<'PY'
+import http.server, json, sys
+
+log_path, port = sys.argv[1], int(sys.argv[2])
+
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        with open(log_path, "a") as f:
+            f.write(json.dumps({"path": self.path, "auth": self.headers.get("Authorization"),
+                                 "body": json.loads(body)}) + "\n")
+        self.send_response(201)
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *a):
+        pass
+
+
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+FAKEQ_LOG="$TMP/fakequorum.log"; : > "$FAKEQ_LOG"
+FAKEQ_PORT=18899
+python3 "$TMP/fakequorum.py" "$FAKEQ_LOG" "$FAKEQ_PORT" &
+FAKEQ_PID=$!
+trap 'kill "$FAKEQ_PID" 2>/dev/null || true' EXIT
+for _ in $(seq 1 50); do
+  python3 -c "import socket; socket.create_connection(('127.0.0.1', $FAKEQ_PORT), timeout=0.1).close()" \
+    2>/dev/null && break
+  sleep 0.05
+done
+
+python3 - "$ORCH" "$TMP" "$FAKEQ_LOG" "$FAKEQ_PORT" <<'PY' || fail "quorum fan-out checks failed"
+import json, os, sys
+
+orch, tmp, log_path, port = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+sys.path.insert(0, orch)
+sys.path.insert(0, os.path.join(orch, "system-scripts"))
+import quorum_report
+
+
+def tail(n=None):
+    with open(log_path) as f:
+        lines = [json.loads(line) for line in f if line.strip()]
+    return lines if n is None else lines[-n:]
+
+
+ws = os.path.join(tmp, "qws"); os.makedirs(os.path.join(ws, "tasks", "_features"))
+os.makedirs(os.path.join(ws, "tasks", "1234-a-task"))
+open(os.path.join(ws, "tasks", "1234-a-task", "task.md"), "w").write("Feature: shiny-thing\n")
+open(os.path.join(ws, "tasks", "_features", "shiny-thing.md"), "w").write("Status: open\n")
+
+# --- module-level behaviour: resolution + delivery, config-absent, refused
+assert quorum_report.resolve_feature("proj", "nothing here", workspace=ws) is None
+assert quorum_report.resolve_feature("proj", "Task 1234 blocked: reason", workspace=ws) == "shiny-thing"
+assert quorum_report.resolve_feature("proj", "Feature shiny-thing blocked", workspace=ws) == "shiny-thing"
+assert quorum_report.resolve_feature("proj", "Feature no-such-thing blocked", workspace=ws) is None
+assert quorum_report.resolve_feature("proj", "Task 9999 blocked", workspace=ws) is None
+
+env_ok = {"QUORUM_CHAT_URL": f"http://127.0.0.1:{port}", "QUORUM_PIPE_TOKEN": "pipe-tok"}
+assert quorum_report.report("proj", "no config", env={}) is False, "no config must not post, not raise"
+assert not os.path.exists(log_path) or tail() == [], "no config must not touch the fake server"
+
+assert quorum_report.report("proj", "hello project chat", workspace=ws, env=env_ok) is True
+row = tail(1)[0]
+assert row["path"] == "/v1/chat/projects/proj/messages", row
+assert row["auth"] == "Bearer pipe-tok", row
+assert row["body"] == {"kind": "text", "text": "hello project chat"}, row
+
+assert quorum_report.report("proj", "Task 1234 blocked: reason", workspace=ws, env=env_ok) is True
+row = tail(1)[0]
+assert row["path"] == "/v1/chat/features/proj/shiny-thing/messages", row
+
+# an endpoint that refuses must not raise
+bad_env = {"QUORUM_CHAT_URL": "http://127.0.0.1:1", "QUORUM_PIPE_TOKEN": "pipe-tok"}
+assert quorum_report.report("proj", "unreachable", env=bad_env) is False
+
+# --- daemon.reap_jobs also posts into Quorum (project chat, always — a job
+# kind is a project action, never a task's), on both the success and the
+# failure/rejection path
+import daemon
+posted = []
+daemon.quorum_report.report = lambda project, text, **kw: posted.append((project, text)) or True
+daemon.RUN_DIR = os.path.join(tmp, "qrun"); os.makedirs(daemon.RUN_DIR)
+
+
+class FakeAPI:
+    def send_message(self, chat, text, thread_id=None):
+        return {}
+
+
+class FakePopen:
+    def __init__(self, rc): self._rc = rc
+    def poll(self): return self._rc
+    def wait(self): return self._rc
+
+
+daemon._JOBS[:] = [{"popen": FakePopen(0), "log": os.path.join(daemon.RUN_DIR, "ok.log"),
+                    "name": "proj", "action": "build", "topic": 5}]
+open(os.path.join(daemon.RUN_DIR, "ok.log"), "w").write("did the thing\n")
+daemon.reap_jobs({"chat_id": "-100"}, FakeAPI())
+assert any(p == "proj" and t.startswith("✅") for p, t in posted), posted
+
+posted.clear()
+daemon._JOBS[:] = [{"popen": FakePopen(1), "log": os.path.join(daemon.RUN_DIR, "bad.log"),
+                    "name": "proj", "action": "build", "topic": 5}]
+open(os.path.join(daemon.RUN_DIR, "bad.log"), "w").write("boom\n")
+daemon.reap_jobs({"chat_id": "-100"}, FakeAPI())
+assert any(p == "proj" and "exited with code 1" in t for p, t in posted), posted
+
+# --- checkout.py's _post also fans into Quorum, addressed by the offer's own
+# project + workspace
+import checkout
+posted.clear()
+checkout.quorum_report.report = lambda project, text, **kw: posted.append((project, text)) or True
+class _NoTelegram:
+    ENV_FILE = "/nonexistent"
+    @staticmethod
+    def load_env(_): return {}
+sys.modules["daemon"] = _NoTelegram
+checkout._post({"name": "proj", "workspace": ws, "topic": 5}, "checkout progress")
+assert posted == [("proj", "checkout progress")], posted
+del sys.modules["daemon"]
+
+# --- plugin.py's report is scaffold-wide, not one project's: it fans into
+# Quorum's own "quorum" project chat (the self project, task 0071's judgment
+# call — DESIGN already names "quorum" as the project Quorum is registered
+# under for exactly this kind of self-referential report)
+import plugin as plugin_mod
+posted.clear()
+plugin_mod.quorum_report.report = lambda project, text, **kw: posted.append((project, text)) or True
+plugin_mod.TELEGRAM_ENV = "/nonexistent"
+plugin_mod.post("version report body")
+assert posted == [("quorum", "version report body")], posted
+PY
+echo "[smoke] quorum fan-out (reap_jobs/checkout.py/plugin.py) ok"
+
+# --- relaunch's own Quorum leg: end-to-end through the real script (no dev
+# script found is the cheapest path that still calls post()).
+: > "$FAKEQ_LOG"
+rtmp="$TMP/rq"; mkdir -p "$rtmp/proj/intentpipe"
+cat > "$rtmp/telegram.env" <<EOF
+QUORUM_CHAT_URL=http://127.0.0.1:$FAKEQ_PORT
+QUORUM_PIPE_TOKEN=pipe-tok
+EOF
+python3 -c "import json; json.dump({'9': {'name': 'proj', 'workspace': '$rtmp/proj/intentpipe'}}, open('$rtmp/registry.json', 'w'))"
+AGENT_ORCH_HOME="$rtmp" "$ORCH/relaunch" proj >/dev/null 2>&1 || true
+grep -q '"path": "/v1/chat/projects/proj/messages"' "$FAKEQ_LOG" \
+  || fail "relaunch must also post into Quorum's project chat"
+grep -q "no dev script found" "$FAKEQ_LOG" || fail "relaunch's quorum post must carry the same text"
+echo "[smoke] relaunch quorum leg ok"
+
+kill "$FAKEQ_PID" 2>/dev/null || true
+trap - EXIT
+
 echo "SMOKE OK"

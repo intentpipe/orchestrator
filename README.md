@@ -320,6 +320,35 @@ General is still where the box-level keywords are meant to be used; only the fre
 Cross-project work goes through SSH / Claude Code directly, which is what the escape hatch in
 that decision already pointed at.
 
+## Job tickets: the same commands, asked for from Quorum
+
+Telegram is not the only door any more. The Quorum app's run bar asks for a run by writing a
+**job ticket** — one small JSON file in `~/.agent-orchestrator/jobs/`, the only directory its
+api container may write (`core/compose.yaml` mounts that one path writable and the rest of this
+home read-only). Every poll cycle, next to `reap_jobs` and `launch_due_resumes`, the daemon
+picks the tickets up and runs each one through the very code a Telegram trigger runs through:
+
+```json
+{"id": "1757354000123456-quorum-plan", "created_at": 1757354000.123456, "project": "quorum",
+ "kind": "plan", "action": "plan", "args": [], "reply_to": {"channel": "project:quorum", "requester": "Ada"}}
+```
+
+`action` is this daemon's own: `plan`, `loop`, `unblock`, `retro`, `cleanup` go through
+`dispatch()` (same argv, `sync_plugin` first, same one-run-per-project pidfile mutex, same
+completion report), `checkout` posts this project's checkout options, `relaunch` (with
+`args: ["--force"]` for `relaunch force`) rebuilds its preview. Nothing about what a run *is*
+lives on the Quorum side — it has no `claude`, no plugin cache and no token — and a ticket is
+not more trusted than a trigger: a busy project refuses both.
+
+A ticket is **claimed before it runs**, by moving it into `jobs/taken/`: a ticket that crashes
+the daemon is never re-run, and a run started twice is worse than one lost. The claimed file
+keeps `reply_to` (which chat channel and which person to answer) and gains the outcome — what
+the completion report back into Quorum is posted from. A ticket still sitting in `jobs/` is one
+nobody has taken, which is how Quorum notices this daemon is down and says so in the channel.
+
+The directory belongs to the daemon (created at startup): Quorum never creates it, so a box
+where this daemon has never run answers "no job directory" instead of queueing runs into a hole.
+
 ## `system-scripts/`
 
 Server-wide, cross-project tooling that isn't the Telegram bridge itself: the `status`

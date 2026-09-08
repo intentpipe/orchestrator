@@ -67,12 +67,12 @@ post() { # topic_id name text
   fi
   # Task 0071: the same line, into Quorum's project chat — always project-
   # scoped (a relaunch is never one task's), best-effort so a Quorum outage
-  # never affects the Telegram post above.
+  # never affects the Telegram post above. Routed through quorum_report.py's
+  # own CLI (ORCH_HOME, not this script's AGENT_ORCH_HOME, is its env var —
+  # pass it through explicitly) rather than a third hand-rolled copy of the
+  # same request.
   if [ -n "${QUORUM_CHAT_URL:-}" ] && [ -n "${QUORUM_PIPE_TOKEN:-}" ]; then
-    body="$(python3 -c 'import json,sys; print(json.dumps({"kind": "text", "text": sys.argv[1]}))' "$text")"
-    curl -fsS "${QUORUM_CHAT_URL%/}/v1/chat/projects/$name/messages" \
-      -H "Authorization: Bearer $QUORUM_PIPE_TOKEN" -H "Content-Type: application/json" \
-      --data-binary "$body" >/dev/null \
+    ORCH_HOME="$ORCH_HOME" python3 "$(dirname "$0")/quorum_report.py" "$name" "$text" \
       || echo "[relaunch] quorum send failed for $name" >&2
   fi
 }

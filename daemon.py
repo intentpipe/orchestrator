@@ -915,7 +915,8 @@ def offer_retro_proposals(job, cfg, api):
     if not new:
         none_yet = "📋 retro: no new proposals this run."
         api.send_message(cfg["chat_id"], none_yet, job.get("topic"))
-        quorum_report.report(job["name"], none_yet)
+        quorum_report.report(job["name"], none_yet, channel=job.get("reply_channel"),
+                             route_text="retro: no new proposals")
         return "retro: no new proposals"
     offers = load_retro_offers()
     for fname in new[:6]:
@@ -925,7 +926,14 @@ def offer_retro_proposals(job, cfg, api):
                 + (f"confidence: {conf}\n" if conf else "")
                 + f"\n{fname}\n\nReact to this message to apply it (branch + PR in the intentpipe repo).")
         resp = api.send_message(cfg["chat_id"], body, job.get("topic"))
-        quorum_report.report(job["name"], body, workspace=job.get("workspace"))
+        # Retro/logmine offers are project-scoped by criterion 1 even though a
+        # proposal's own title routinely names a task ("task 0069 spawned
+        # twice") — route on a title-free line so that never misroutes it, and
+        # honour the ticket's own reply_channel when a retro was started from
+        # Quorum (criterion 2), exactly as reap_jobs does for completions.
+        quorum_report.report(job["name"], body, workspace=job.get("workspace"),
+                             channel=job.get("reply_channel"),
+                             route_text=f"retro proposal for {job['name']}")
         mid = (resp or {}).get("result", {}).get("message_id")
         if mid is not None:
             offers[str(mid)] = {"file": path, "name": job["name"], "topic": job.get("topic")}

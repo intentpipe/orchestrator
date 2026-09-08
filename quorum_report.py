@@ -144,45 +144,53 @@ def report(project, text, feature=None, workspace=None, env=None, channel=None, 
     task/feature names from unrelated work almost every time — can never steer
     the destination.
     """
-    env = load_env() if env is None else env
-    base, token = env.get("QUORUM_CHAT_URL"), env.get("QUORUM_PIPE_TOKEN")
-    if not base or not token or not project:
-        return False
-    if feature is None:
-        if channel is not None:
-            feature = feature_from_channel(channel)
-        else:
-            feature = resolve_feature(project, route_text if route_text is not None else text,
-                                       workspace=workspace)
-    base = base.rstrip("/")
-    url = (
-        f"{base}/v1/chat/projects/{project}/messages"
-        if feature is None
-        else f"{base}/v1/chat/features/{project}/{feature}/messages"
-    )
-    body = json.dumps({"kind": "text", "text": text}).encode()
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
-    )
     try:
+        env = load_env() if env is None else env
+        base, token = env.get("QUORUM_CHAT_URL"), env.get("QUORUM_PIPE_TOKEN")
+        if not base or not token or not project:
+            return False
+        if feature is None:
+            if channel is not None:
+                feature = feature_from_channel(channel)
+            else:
+                feature = resolve_feature(project, route_text if route_text is not None else text,
+                                           workspace=workspace)
+        base = base.rstrip("/")
+        url = (
+            f"{base}/v1/chat/projects/{project}/messages"
+            if feature is None
+            else f"{base}/v1/chat/features/{project}/{feature}/messages"
+        )
+        body = json.dumps({"kind": "text", "text": text}).encode()
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=10):
             return True
-    except (OSError, urllib.error.URLError) as error:
+    except Exception as error:   # config unreadable/corrupt, network refused, anything else:
+        # a Quorum-side problem must never surface to a caller whose Telegram
+        # leg has already been decided — see module docstring and criterion 3.
         print(f"[quorum_report] post to {project} failed (non-fatal): {error}", file=sys.stderr)
         return False
 
 
 def main(argv):
+    """CLI wrapper so bash callers (`relaunch`) don't hand-roll their own copy
+    of this POST. With no `feature`, the post is forced project-scoped
+    (`channel=f"project:{project}"`, which `feature_from_channel` always reads
+    as None) rather than classified by regex over `text` — a relaunch's URL
+    message is never task/feature-scoped."""
     if len(argv) < 2:
         print("usage: quorum_report.py <project> <text> [feature]", file=sys.stderr)
         return 2
     project, text = argv[0], argv[1]
     feature = argv[2] if len(argv) > 2 else None
-    report(project, text, feature=feature)
-    return 0
+    channel = None if feature is not None else f"project:{project}"
+    ok = report(project, text, feature=feature, channel=channel)
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

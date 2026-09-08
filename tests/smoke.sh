@@ -1491,6 +1491,64 @@ finally:
     daemon.spawn_detached, daemon.sync_plugin = real_spawn_detached, real_sync_plugin
 assert tracked.get("reply_channel") == "feature:proj:shiny-thing", tracked
 
+# --- true end-to-end (0071 review round 2, blocking): an ACTUAL job ticket,
+# driven through pickup_tickets -> _run_ticket -> dispatch -> _JOBS -> reap_jobs,
+# must have its completion land on the channel the ticket's own reply_to.channel
+# named. The asserts above build their intermediates by hand (a _JOBS literal,
+# a direct dispatch() call) and never exercise _run_ticket's own read of
+# reply_to["channel"] off the ticket (the exact link round 1 found missing) —
+# this one does, so mutating that read (e.g. reply_to.get("chanel")) must turn
+# this block red.
+daemon.JOBS_DIR = os.path.join(tmp, "e2e-jobs"); os.makedirs(daemon.JOBS_DIR)
+daemon._JOBS[:] = []
+daemon.load_registry = lambda: {"5": {"name": "proj", "workspace": ws}}
+e2e_tracked = []
+def _e2e_spawn(cmd, cwd, base, track=None):
+    e2e_tracked.append(track)
+    if track is not None:
+        daemon._JOBS.append({"popen": FakePopen(0),
+                              "log": os.path.join(daemon.RUN_DIR, "e2e.log"), **track})
+    return 5555
+daemon.spawn_detached, daemon.sync_plugin = _e2e_spawn, lambda cfg: None
+open(os.path.join(daemon.RUN_DIR, "e2e.log"), "w").write("done\n")
+with open(os.path.join(daemon.JOBS_DIR, "e2e-ticket.json"), "w") as fh:
+    json.dump({"project": "proj", "action": "unblock", "args": [],
+               "reply_to": {"channel": "feature:proj:shiny-thing", "requester": "Ada"}}, fh)
+try:
+    daemon.pickup_tickets({"chat_id": "-100", "maw_scripts": "/opt/maw/scripts",
+                           "plan_model": "claude-fable-5"}, FakeAPI())
+finally:
+    daemon.spawn_detached, daemon.sync_plugin = real_spawn_detached, real_sync_plugin
+assert e2e_tracked and e2e_tracked[0].get("reply_channel") == "feature:proj:shiny-thing", e2e_tracked
+daemon.reap_jobs({"chat_id": "-100"}, FakeAPI())
+row = tail(1)[0]
+assert row["path"] == "/v1/chat/features/proj/shiny-thing/messages", \
+    f"an actual job ticket's own reply_to.channel must reach the completion report: {row}"
+
+# --- regression (0071 review round 2, nit): a retro offer's title routinely
+# names a task ("task 1234 ..."), but criterion 1 classes retro/logmine offers
+# as project-scoped — offer_retro_proposals must not let the proposal body
+# steer it there by regex, and must honour the job's own reply_channel when a
+# retro was started from Quorum.
+retro_ws = os.path.join(tmp, "retro-ws"); os.makedirs(os.path.join(retro_ws, "retro"))
+open(os.path.join(retro_ws, "retro", "2026-01-01-x.md"), "w").write(
+    "# task 1234 spawned twice\n\n## Confidence\nhigh\n")
+posted.clear()
+daemon.quorum_report.report = real_report
+daemon.load_retro_offers, daemon.save_retro_offers = lambda: {}, lambda o: None
+daemon.offer_retro_proposals(
+    {"name": "proj", "workspace": retro_ws, "topic": 5, "retro_before": []}, {"chat_id": "-100"}, FakeAPI())
+row = tail(1)[0]
+assert row["path"] == "/v1/chat/projects/proj/messages", \
+    f"a retro offer naming a task must still be project-scoped: {row}"
+
+daemon.offer_retro_proposals(
+    {"name": "proj", "workspace": retro_ws, "topic": 5, "retro_before": [],
+     "reply_channel": "feature:proj:shiny-thing"}, {"chat_id": "-100"}, FakeAPI())
+row = tail(1)[0]
+assert row["path"] == "/v1/chat/features/proj/shiny-thing/messages", \
+    f"a retro offer must honour the job's own reply_channel: {row}"
+
 # --- checkout.py's _post also fans into Quorum, addressed by the offer's own
 # project + workspace
 import checkout

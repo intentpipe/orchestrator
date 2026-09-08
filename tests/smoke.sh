@@ -1084,4 +1084,160 @@ echo 999999 > "$PREV/state/web-serve.pid"
 prev preview_current && fail "a dead server must rebuild however current the code is" || true
 echo "[smoke] preview-lib ok"
 
+# --- Job tickets (task 0069): Quorum asks for a run by writing a ticket into
+# $ORCH_HOME/jobs/, and the daemon executes it through the SAME dispatch a
+# Telegram trigger goes through. What matters is that the two paths are one:
+# same argv, same cwd, sync_plugin first, same pidfile mutex — plus that a
+# ticket is claimed exactly once and never re-run.
+python3 - "$ORCH" "$TMP" <<'PY' || fail "job ticket checks failed"
+import json, os, sys
+orch, tmp = sys.argv[1], sys.argv[2]
+sys.path.insert(0, orch)
+import daemon
+box = os.path.join(tmp, "jobs-box")
+daemon.RUN_DIR = os.path.join(box, "run"); os.makedirs(daemon.RUN_DIR)
+daemon.JOBS_DIR = os.path.join(box, "jobs"); os.makedirs(daemon.JOBS_DIR)
+root = os.path.join(box, "proj"); ws = os.path.join(root, "intentpipe"); os.makedirs(ws)
+cfg = {"chat_id": "-100", "allowlist": {"42"}, "maw_scripts": "/opt/maw/scripts",
+       "plan_model": "claude-fable-5"}
+reg = {"5": {"name": "proj", "workspace": ws}}
+daemon.load_registry = lambda: reg
+class FakeAPI:
+    def __init__(self): self.sent = []; self.reactions = []; self._mid = 0
+    def send_message(self, chat, text, thread_id=None):
+        self.sent.append((thread_id, text)); self._mid += 1
+        return {"result": {"message_id": self._mid}}
+    def set_reaction(self, chat, mid, emoji): self.reactions.append((mid, emoji))
+spawns = []
+def fake_spawn(cmd, cwd, base, track=None):
+    """Records, and writes the pidfile the real spawn writes — the mutex both
+    doors share is the point of this block, so it has to be live."""
+    spawns.append((cmd, cwd, base))
+    open(os.path.join(daemon.RUN_DIR, base + ".pid"), "w").write(str(os.getpid()))
+    return 4242
+daemon.spawn_detached = fake_spawn
+synced = []
+daemon.sync_plugin = lambda cfg: synced.append(True)
+mk = lambda **kw: {"from": {"id": 42}, "chat": {"id": -100}, "message_id": kw.pop("mid", 1),
+                   "date": 1700000000, "message_thread_id": 5, **kw}
+
+def ticket(name, **fields):
+    body = {"id": name, "created_at": 1757000000.5, "project": "proj", "kind": "plan",
+            "action": "plan", "args": [], "reply_to": {"channel": "project:proj",
+                                                       "requester": "Ada"}}
+    body.update(fields)
+    with open(os.path.join(daemon.JOBS_DIR, name + ".json"), "w") as fh:
+        json.dump(body, fh)
+    return body
+
+def queued():
+    return sorted(n for n in os.listdir(daemon.JOBS_DIR) if n.endswith(".json"))
+
+def taken():
+    d = os.path.join(daemon.JOBS_DIR, "taken")
+    return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+# What the Telegram 🧠 spawns, as the baseline the ticket must match exactly.
+api = FakeAPI()
+assert daemon.process_message(mk(text="🧠"), cfg, reg, api).startswith("plan started"), "baseline"
+telegram = spawns.pop()
+assert not spawns and synced, "baseline must sync the plugin and spawn once"
+os.remove(os.path.join(daemon.RUN_DIR, "proj.plan.pid"))
+synced.clear()
+
+# The same run, asked for with a ticket: same argv, same cwd, same pidfile base.
+ticket("1757000000-proj-plan")
+api = FakeAPI()
+daemon.pickup_tickets(cfg, api)
+assert len(spawns) == 1, spawns
+assert spawns[0] == telegram, (spawns[0], telegram)
+assert synced, "a ticket must sync the plugin first, exactly as dispatch does"
+assert os.path.exists(os.path.join(daemon.RUN_DIR, "proj.plan.pid")), "pidfile"
+assert api.sent and api.sent[0] == (5, "🧠 planning…"), api.sent
+# Claimed exactly once: moved out of the queue, and a second cycle re-runs nothing.
+assert queued() == [] and taken() == ["1757000000-proj-plan.json"], (queued(), taken())
+daemon.pickup_tickets(cfg, FakeAPI())
+assert len(spawns) == 1, "a claimed ticket must never run twice"
+# The claimed ticket keeps where the answer is owed — task 0071 reports back with it.
+kept = json.load(open(os.path.join(daemon.JOBS_DIR, "taken", taken()[0])))
+assert kept["reply_to"] == {"channel": "project:proj", "requester": "Ada"}, kept
+assert "plan started for proj" in kept["result"], kept
+
+# Busy: the daemon's own mutex refuses the ticket, spawns nothing, and says so.
+spawns.clear()
+ticket("1757000001-proj-plan", id="1757000001-proj-plan")
+api = FakeAPI()
+daemon.pickup_tickets(cfg, api)
+assert not spawns, spawns
+assert queued() == [] and len(taken()) == 2, (queued(), taken())
+assert any("already running" in text for _, text in api.sent), api.sent
+os.remove(os.path.join(daemon.RUN_DIR, "proj.plan.pid"))
+
+# The kinds beyond plan|build|unblock|retro: cleanup dispatches, relaunch (and
+# `relaunch force`) run the relaunch script, checkout posts the options.
+spawns.clear()
+ticket("t-cleanup", action="cleanup", kind="cleanup")
+daemon.pickup_tickets(cfg, FakeAPI())
+assert spawns[-1][0][:3] == ["claude", "-p", "/intentpipe:cleanup headless"], spawns[-1]
+assert spawns[-1][2] == "proj.cleanup", spawns[-1]
+os.remove(os.path.join(daemon.RUN_DIR, "proj.cleanup.pid"))
+spawns.clear()
+ticket("t-relaunch", action="relaunch", kind="relaunch")
+daemon.pickup_tickets(cfg, FakeAPI())
+assert spawns[-1][0] == [daemon.RELAUNCH, "proj"], spawns[-1]
+assert spawns[-1][2] == "proj.relaunch", spawns[-1]
+os.remove(os.path.join(daemon.RUN_DIR, "proj.relaunch.pid"))
+spawns.clear()
+ticket("t-force", action="relaunch", args=["--force"], kind="relaunch force")
+daemon.pickup_tickets(cfg, FakeAPI())
+assert spawns[-1][0] == [daemon.RELAUNCH, "--force", "proj"], spawns[-1]
+os.remove(os.path.join(daemon.RUN_DIR, "proj.relaunch.pid"))
+spawns.clear()
+daemon.checkout_options = lambda workspace: {
+    "name": "proj",
+    "options": [{"label": "feature/x", "body": "• core: feature/x",
+                 "branches": {"core": "feature/x"}}],
+}
+daemon.OFFERS_FILE = os.path.join(box, "checkout_offers.json")
+ticket("t-checkout", action="checkout", kind="checkout")
+api = FakeAPI()
+daemon.pickup_tickets(cfg, api)
+assert not spawns, "checkout offers options, it does not spawn"
+assert any("feature/x" in text for _, text in api.sent), api.sent
+
+# Junk must not wedge the queue: unreadable, unregistered and unknown-action
+# tickets are claimed, reported and stepped over.
+spawns.clear()
+open(os.path.join(daemon.JOBS_DIR, "broken.json"), "w").write("{not json")
+ticket("t-elsewhere", project="other")
+ticket("t-unknown", action="deploy")
+api = FakeAPI()
+daemon.pickup_tickets(cfg, api)
+assert not spawns, spawns
+assert queued() == [], queued()
+
+# A non-.json file in the directory is not a ticket (the stale marker Quorum
+# writes beside one lives here too).
+open(os.path.join(daemon.JOBS_DIR, "t-note.stale"), "w").write("")
+daemon.pickup_tickets(cfg, FakeAPI())
+assert os.path.exists(os.path.join(daemon.JOBS_DIR, "t-note.stale")), "markers are left alone"
+
+# Telegram is untouched by all of this: 🧠 still spawns exactly what it did.
+spawns.clear()
+api = FakeAPI()
+assert daemon.process_message(mk(text="🧠", mid=9), cfg, reg, api).startswith("plan started")
+assert spawns == [telegram], spawns
+PY
+echo "[smoke] job tickets ok"
+
+# --- The spawned claude's credentials: a systemd user unit never sources a
+# shell profile, so the OAuth token comes from claude-auth.env — never the
+# refreshable ~/.claude/.credentials.json, whose stale refresh token once broke
+# every headless run.
+UNIT="$ORCH/systemd/agent-orchestrator.service"
+grep -q 'EnvironmentFile=%h/.agent-orchestrator/claude-auth.env' "$UNIT" \
+  || fail "the unit must load claude-auth.env"
+grep -q 'credentials.json' "$UNIT" && fail "the unit must not point at ~/.claude/.credentials.json"
+echo "[smoke] claude auth source ok"
+
 echo "SMOKE OK"

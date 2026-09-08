@@ -80,6 +80,15 @@ ENV_FILE = os.environ.get("TELEGRAM_ENV", os.path.join(ORCH_HOME, "telegram.env"
 REGISTRY = os.path.join(ORCH_HOME, "registry.json")
 OFFSET_FILE = os.path.join(ORCH_HOME, "offset")
 RUN_DIR = os.path.join(ORCH_HOME, "run")
+# Quorum's job tickets: the one directory quorum-core may write inside this home
+# (its api container mounts only this, writable — see core/compose.yaml). A
+# ticket is a small JSON file naming a project and one of this daemon's own
+# commands; picking it up is how a run started in the app becomes a real run,
+# through the same dispatch() a Telegram trigger goes through. Claimed tickets
+# move into TAKEN_DIR, which is also what tells the app "not picked up yet"
+# from "running".
+JOBS_DIR = os.path.join(ORCH_HOME, "jobs")
+TAKEN_DIR = "taken"
 TRANSCRIBE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcribe.sh")
 STATUS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "status.py")
 PULL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-scripts", "pull.py")
@@ -1333,6 +1342,133 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
     return f"{action} started for {name} (pid {pid})"
 
 
+def launch_relaunch(entry, cfg, api, thread_id, react, fail, force=False):
+    """Rebuild ONE project's preview stack (down → fresh up), detached — the
+    rebuild takes minutes, so relaunch posts the new URL (or a failure) into the
+    topic itself when it's done.
+
+    A plain relaunch no-ops when the preview already serves the checked-out
+    commits (relaunch's build watermark); `force` is the way to say "I don't
+    care what the watermark thinks, build it again" — the only escape hatch when
+    a preview looks wrong in a way the watermark can't see.
+
+    Shared by the `relaunch` keyword and Quorum's `relaunch` job ticket, so both
+    take the same mutex and spawn the same argv.
+    """
+    name = entry["name"]
+    base = f"{name}.relaunch"
+    if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
+        return fail(f"skip: relaunch already running for {name}", "a relaunch is already running")
+    busy = project_busy(name, base)
+    if busy:   # a rebuild mid-build would swap branches under a running loop
+        return fail(f"skip: {busy} already running for {name}",
+                    f"{busy} is still running for {name} — wait for it to finish, then retry")
+    argv = [RELAUNCH, "--force", name] if force else [RELAUNCH, name]
+    try:
+        pid = spawn_detached(argv, os.path.dirname(RELAUNCH), base)
+    except OSError as e:
+        return fail(f"error: spawn relaunch failed: {e}", f"couldn't start relaunch: {e}")
+    api.send_message(cfg["chat_id"], f"🚀 relaunching {name} — the fresh frontend URL will follow.", thread_id)
+    react("👌")
+    return f"relaunch started for {name} (pid {pid})"
+
+
+def pickup_tickets(cfg, api):
+    """Execute the job tickets Quorum wrote (quorum-core `jobs.py`). Called once
+    per poll cycle, like launch_due_resumes.
+
+    The app cannot start a pipeline run itself — no claude, no plugin cache, no
+    token in its container, and this home mounted read-only apart from JOBS_DIR
+    — so it writes down what was asked for and this runs it, through the very
+    dispatch()/keyword paths a Telegram trigger takes: same argv, sync_plugin
+    first, same one-run-per-project pidfile mutex. Nothing about what a run *is*
+    is reimplemented on the Quorum side, and nothing here treats a ticket as
+    more trusted than a trigger.
+
+    A ticket is claimed by moving it into JOBS_DIR/taken/ BEFORE it is run: a
+    ticket that crashes this must not be re-run on the next cycle, and a run
+    started twice is worse than one lost. The claimed file keeps `reply_to` (the
+    channel and the person to answer) and gains the outcome — what task 0071
+    posts the completion report with.
+    """
+    try:
+        names = sorted(n for n in os.listdir(JOBS_DIR) if n.endswith(".json"))
+    except OSError:
+        return   # no job directory on this box: nothing asked, nothing to do
+    if not names:
+        return
+    registry = load_registry()
+    for name in names:
+        taken = os.path.join(JOBS_DIR, TAKEN_DIR, name)
+        try:
+            os.makedirs(os.path.join(JOBS_DIR, TAKEN_DIR), exist_ok=True)
+            os.rename(os.path.join(JOBS_DIR, name), taken)
+        except OSError as e:
+            log(f"job ticket {name}: could not claim it ({e})")
+            continue
+        try:
+            with open(taken) as fh:
+                ticket = json.load(fh)
+            if not isinstance(ticket, dict):
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as e:
+            log(f"job ticket {name}: unreadable, ignored ({e})")
+            continue
+        try:
+            result = _run_ticket(ticket, cfg, api, registry)
+        except Exception as e:   # one bad ticket must never stop the queue
+            result = f"error: {e}"
+        log(f"job ticket {name}: {result}")
+        _record_ticket_result(taken, result)
+
+
+def _run_ticket(ticket, cfg, api, registry):
+    """Route one ticket to the command it names; a one-line status for the log."""
+    project, action = ticket.get("project"), ticket.get("action")
+    args = ticket.get("args") or []
+    who = (ticket.get("reply_to") or {}).get("requester") or "quorum"
+    entry, topic = None, None
+    for thread_id, candidate in registry.items():
+        if candidate.get("name") == project:
+            # The registry keys topics as strings; Telegram wants the integer a
+            # message carries, so the ack lands in the same topic a trigger's would.
+            entry = candidate
+            topic = int(thread_id) if str(thread_id).isdigit() else thread_id
+            break
+    if entry is None:
+        return f"skip: no registered project {project!r}"
+
+    def fail(reason, reply):
+        # Same shape as launch_due_resumes' own failures: the topic hears why
+        # nothing ran. Quorum hears it too — its own busy check answers the
+        # button, and task 0071 reads this outcome off the claimed ticket.
+        api.send_message(cfg["chat_id"],
+                         f"⚠️ {action} for {project} (asked in Quorum by {who}): {reply}", topic)
+        return reason
+
+    react = lambda emoji: None   # a ticket has no message to react to
+    if action in PROJECT_ACTIONS and action not in ("checkout", "relaunch"):
+        return dispatch(action, entry, cfg, api, topic, react, fail)
+    if action == "checkout":
+        return offer_checkout(entry, cfg, api, topic, react, fail)
+    if action == "relaunch":
+        return launch_relaunch(entry, cfg, api, topic, react, fail, force="--force" in args)
+    return fail(f"skip: unknown action {action!r}", f"{action!r} is not a command I have")
+
+
+def _record_ticket_result(path, result):
+    """Write the outcome into the claimed ticket, beside where it reports back."""
+    try:
+        with open(path) as fh:
+            ticket = json.load(fh)
+        ticket["taken_at"] = time.time()
+        ticket["result"] = result
+        with open(path, "w") as fh:
+            json.dump(ticket, fh, indent=2, sort_keys=True)
+    except (OSError, ValueError) as e:
+        log(f"could not record the outcome in {os.path.basename(path)}: {e}")
+
+
 def process_message(msg, cfg, registry, api):
     """Handle one Telegram message; return a one-line status for the log.
 
@@ -1459,27 +1595,8 @@ def _route(msg, cfg, registry, api, thread_id, react, fail):
     # post the new frontend URL. Detached — the rebuild takes minutes; relaunch
     # posts the URL (or a failure) into the topic itself when it's done.
     if stripped in RELAUNCH_WORDS:
-        name = entry["name"]
-        base = f"{name}.relaunch"
-        if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
-            return fail(f"skip: relaunch already running for {name}", "a relaunch is already running")
-        busy = project_busy(name, base)
-        if busy:   # a rebuild mid-build would swap branches under a running loop
-            return fail(f"skip: {busy} already running for {name}",
-                        f"{busy} is still running for {name} — wait for it to finish, then retry")
-        # A plain `relaunch` no-ops when the preview already serves the checked-out
-        # commits (relaunch's build watermark). `relaunch force` is the way to say
-        # "I don't care what the watermark thinks, build it again" from the phone —
-        # the only escape hatch a Telegram user has when a preview looks wrong in a
-        # way the watermark can't see.
-        argv = [RELAUNCH, name] if stripped == "relaunch" else [RELAUNCH, "--force", name]
-        try:
-            pid = spawn_detached(argv, os.path.dirname(RELAUNCH), base)
-        except OSError as e:
-            return fail(f"error: spawn relaunch failed: {e}", f"couldn't start relaunch: {e}")
-        api.send_message(cfg["chat_id"], f"🚀 relaunching {name} — the fresh frontend URL will follow.", thread_id)
-        react("👌")
-        return f"relaunch started for {name} (pid {pid})"
+        return launch_relaunch(entry, cfg, api, thread_id, react, fail,
+                               force=stripped != "relaunch")
 
     action = TRIGGERS.get(stripped)
     if action:
@@ -1537,6 +1654,14 @@ def run(once=False):
     api = TelegramAPI(cfg["token"])
     # Reconcile the pidfiles a previous daemon left BEFORE any topic can trigger a
     # run: a stale one refuses every new plan, a live one must be tracked again.
+    # The job directory is this daemon's to create: quorum-core writes tickets
+    # into it but never makes it (a ticket dropped where nothing is watching is
+    # a run that silently never happens, so it answers "no job directory"
+    # instead), and a bind source Docker has to invent lands root-owned.
+    try:
+        os.makedirs(os.path.join(JOBS_DIR, TAKEN_DIR), exist_ok=True)
+    except OSError as e:
+        log(f"cannot create the job directory {JOBS_DIR}: {e}")
     adopted, cleared = adopt_orphan_runs()
     if adopted:
         log(f"adopted {len(adopted)} run(s) still in flight from a previous daemon: {', '.join(adopted)}")
@@ -1589,6 +1714,10 @@ def run(once=False):
             launch_due_resumes(cfg, api)
         except Exception as e:
             log(f"limit resume error: {e}")
+        try:  # run whatever Quorum asked for since the last cycle
+            pickup_tickets(cfg, api)
+        except Exception as e:
+            log(f"job ticket error: {e}")
         if time.time() - last_sweep >= ORPHAN_SWEEP_EVERY:
             last_sweep = time.time()
             for pid, comm, age in sweep_orphans():

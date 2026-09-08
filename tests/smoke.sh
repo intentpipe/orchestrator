@@ -1371,6 +1371,8 @@ sys.path.insert(0, orch)
 sys.path.insert(0, os.path.join(orch, "system-scripts"))
 import quorum_report
 
+real_report = quorum_report.report   # saved before any test stubs .report on the shared module
+
 
 def tail(n=None):
     with open(log_path) as f:
@@ -1440,6 +1442,54 @@ daemon._JOBS[:] = [{"popen": FakePopen(1), "log": os.path.join(daemon.RUN_DIR, "
 open(os.path.join(daemon.RUN_DIR, "bad.log"), "w").write("boom\n")
 daemon.reap_jobs({"chat_id": "-100"}, FakeAPI())
 assert any(p == "proj" and "exited with code 1" in t for p, t in posted), posted
+
+# --- regression (0071 review, blocking #1): a completion report must not be
+# routed by regex over the log tail it carries. loop.sh prints "task <id>"
+# lines for nearly every task, so a tail naming an unrelated task 1234 (which
+# DOES resolve to the "shiny-thing" feature above) must still land the
+# project-scoped ✅/😱 in project chat, not that feature's channel.
+daemon.quorum_report.report = real_report   # un-stub: exercise the real routing
+quorum_report.ENV_FILE = os.path.join(tmp, "telegram.env")
+open(quorum_report.ENV_FILE, "w").write(
+    f'QUORUM_CHAT_URL="http://127.0.0.1:{port}"\nQUORUM_PIPE_TOKEN="pipe-tok"\n')
+quorum_report.REGISTRY = os.path.join(tmp, "registry.json")
+json.dump({"5": {"name": "proj", "workspace": ws}}, open(quorum_report.REGISTRY, "w"))
+daemon._JOBS[:] = [{"popen": FakePopen(1), "log": os.path.join(daemon.RUN_DIR, "tail.log"),
+                    "name": "proj", "action": "build", "topic": 5}]
+open(os.path.join(daemon.RUN_DIR, "tail.log"), "w").write(
+    "══ task 1234 (task 1/1)\n── task 1234 → blocked\n")
+daemon.reap_jobs({"chat_id": "-100"}, FakeAPI())
+row = tail(1)[0]
+assert row["path"] == "/v1/chat/projects/proj/messages", \
+    f"a task-naming log tail must not steer a completion report: {row}"
+
+# --- regression (0071 review, blocking #2): a job ticket's own
+# reply_to.channel, threaded through dispatch()/pickup_tickets into the _JOBS
+# entry as "reply_channel", must be honoured outright — the destination task
+# 0069's ticket named, not a guess from the message.
+daemon._JOBS[:] = [{"popen": FakePopen(0), "log": os.path.join(daemon.RUN_DIR, "ch.log"),
+                    "name": "proj", "action": "build", "topic": 5,
+                    "reply_channel": "feature:proj:shiny-thing"}]
+open(os.path.join(daemon.RUN_DIR, "ch.log"), "w").write("done\n")
+daemon.reap_jobs({"chat_id": "-100"}, FakeAPI())
+row = tail(1)[0]
+assert row["path"] == "/v1/chat/features/proj/shiny-thing/messages", \
+    f"the ticket's own reply_to.channel must be honoured: {row}"
+
+# dispatch() must thread a ticket's reply_to.channel into the tracked job.
+tracked = {}
+def _fake_spawn(cmd, cwd, base, track=None):
+    tracked.update(track or {})
+    return 4242
+real_spawn_detached, real_sync_plugin = daemon.spawn_detached, daemon.sync_plugin
+daemon.spawn_detached, daemon.sync_plugin = _fake_spawn, lambda cfg: None
+try:
+    daemon.dispatch("unblock", {"name": "proj", "workspace": ws}, {"chat_id": "-100"}, FakeAPI(),
+                     5, lambda emoji: None, lambda reason, reply: reason,
+                     reply_channel="feature:proj:shiny-thing")
+finally:
+    daemon.spawn_detached, daemon.sync_plugin = real_spawn_detached, real_sync_plugin
+assert tracked.get("reply_channel") == "feature:proj:shiny-thing", tracked
 
 # --- checkout.py's _post also fans into Quorum, addressed by the offer's own
 # project + workspace

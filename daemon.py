@@ -1341,9 +1341,10 @@ def reap_jobs(cfg, api):
                 why = f"was killed by {sig}"
             else:
                 why = f"exited with code {rc}" if rc != 0 else "was blocked — a tool or command was rejected"
-            outcome = f"{'⚠️' if sig else '😱'} {j['action']} for {j['name']} {why}:\n\n{tail}"
+            header = f"{'⚠️' if sig else '😱'} {j['action']} for {j['name']} {why}"
+            outcome = f"{header}:\n\n{tail}"
             api.send_message(cfg["chat_id"], outcome, j.get("topic"))
-            quorum_report.report(j["name"], outcome)
+            quorum_report.report(j["name"], outcome, channel=j.get("reply_channel"), route_text=header)
             # The tail goes to the JOURNAL too, not just Telegram. A bare
             # "FAILED (rc=1)" is unreadable months later and — more to the point —
             # logmine reads this journal, so a failure with no context is a failure
@@ -1354,14 +1355,16 @@ def reap_jobs(cfg, api):
             log(f"{j['action']} for {j['name']} {label}; "
                 f"last lines of {os.path.basename(j['log'])}:\n{detail}")
         else:
-            done = f"✅ {j['action']} for {j['name']} finished."
+            header = f"✅ {j['action']} for {j['name']} finished."
+            done = header
             if j.get("adopted"):   # inherited pid, no wait status — say so, and let the tail carry the outcome
-                done = (f"☑️ {j['action']} for {j['name']} finished — adopted after a daemon "
-                        f"restart, so its exit status is unknown:\n\n{tail}")
+                header = (f"☑️ {j['action']} for {j['name']} finished — adopted after a daemon "
+                          f"restart, so its exit status is unknown")
+                done = f"{header}:\n\n{tail}"
             elif j.get("report_tail"):   # e.g. logmine implement — surface the PR URL
-                done += f"\n\n{tail}"
+                done = f"{header}\n\n{tail}"
             api.send_message(cfg["chat_id"], done, j.get("topic"))
-            quorum_report.report(j["name"], done)
+            quorum_report.report(j["name"], done, channel=j.get("reply_channel"), route_text=header)
             log(f"{j['action']} for {j['name']} finished"
                 + (" (adopted, exit status unknown)" if j.get("adopted") else " ok"))
             # An adopted retro has no retro_before, so every pre-existing report would
@@ -1374,10 +1377,13 @@ def reap_jobs(cfg, api):
     _JOBS[:] = still
 
 
-def dispatch(action, entry, cfg, api, thread_id, react, fail):
+def dispatch(action, entry, cfg, api, thread_id, react, fail, reply_channel=None):
     """Launch a trigger's process. 👌 means STARTED; the run's own notify.sh
     delivers the substance, and reap_jobs posts the completion signal — ✅ on
-    success, 😱 + log tail if it fails or is rejected."""
+    success, 😱 + log tail if it fails or is rejected. `reply_channel` is a
+    Quorum job ticket's own `reply_to.channel` (task 0069/0071): when a run was
+    asked for there, reap_jobs honours it outright instead of guessing the
+    destination from the completion message."""
     sync_plugin(cfg)   # a headless skill run must never execute a stale plugin cache
     name, workspace = entry["name"], entry["workspace"]
     if action == "loop":
@@ -1418,6 +1424,8 @@ def dispatch(action, entry, cfg, api, thread_id, react, fail):
     root = os.path.dirname(workspace) \
         if os.path.basename(workspace.rstrip("/")) in WORKSPACE_DIRS else workspace
     track = {"name": name, "action": action, "topic": thread_id}
+    if reply_channel is not None:
+        track["reply_channel"] = reply_channel
     if action == "retro":   # reap_jobs posts the files the run adds under retro/
         track.update(workspace=workspace, retro_before=_retro_files(workspace))
     try:
@@ -1513,7 +1521,9 @@ def _run_ticket(ticket, cfg, api, registry):
     """Route one ticket to the command it names; a one-line status for the log."""
     project, action = ticket.get("project"), ticket.get("action")
     args = ticket.get("args") or []
-    who = (ticket.get("reply_to") or {}).get("requester") or "quorum"
+    reply_to = ticket.get("reply_to") or {}
+    who = reply_to.get("requester") or "quorum"
+    reply_channel = reply_to.get("channel") or None
     entry, topic = None, None
     for thread_id, candidate in registry.items():
         if candidate.get("name") == project:
@@ -1535,7 +1545,7 @@ def _run_ticket(ticket, cfg, api, registry):
 
     react = lambda emoji: None   # a ticket has no message to react to
     if action in PROJECT_ACTIONS and action not in ("checkout", "relaunch"):
-        return dispatch(action, entry, cfg, api, topic, react, fail)
+        return dispatch(action, entry, cfg, api, topic, react, fail, reply_channel=reply_channel)
     if action == "checkout":
         return offer_checkout(entry, cfg, api, topic, react, fail)
     if action == "relaunch":

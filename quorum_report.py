@@ -40,6 +40,12 @@ REGISTRY = os.environ.get("QUORUM_REGISTRY", os.path.join(ORCH_HOME, "registry.j
 _TASK_RE = re.compile(r"\btask (\d+)", re.IGNORECASE)
 _FEATURE_RE = re.compile(r"\bfeature ([a-z][a-z0-9-]*)", re.IGNORECASE)
 
+# The chat service's own topic key (`chat/lib/chat/channel_key.ex`:
+# `project:<project>` / `feature:<project>:<slug>`) — what a job ticket's
+# `reply_to.channel` (quorum_core/jobs.py) carries verbatim. Trusted structured
+# data, never re-derived by regex over a message that might carry a log tail.
+_CHANNEL_RE = re.compile(r"^(project|feature):[^:]+(?::([a-z][a-z0-9-]*))?$")
+
 
 def load_env(path=None):
     env = {}
@@ -114,16 +120,40 @@ def resolve_feature(project, text, workspace=None):
     return None
 
 
-def report(project, text, feature=None, workspace=None, env=None):
+def feature_from_channel(channel):
+    """The feature slug a job ticket's own `reply_to.channel` names, or None
+    for project chat. `channel` is the chat service's topic key verbatim
+    (`project:<project>` / `feature:<project>:<slug>`) — trusted as written,
+    not re-derived from any message text."""
+    if not channel:
+        return None
+    m = _CHANNEL_RE.match(channel)
+    return m.group(2) if m else None
+
+
+def report(project, text, feature=None, workspace=None, env=None, channel=None, route_text=None):
     """Fan `text` into Quorum's chat for `project`. Best-effort: returns True
     once the post is accepted, False for missing config or any failure — never
-    raises, so a caller's Telegram leg is never affected by this one."""
+    raises, so a caller's Telegram leg is never affected by this one.
+
+    Destination priority: an explicit `feature` wins outright; failing that, a
+    job ticket's `channel` (its `reply_to.channel`, task 0069) is trusted as
+    written; only with neither does the message get classified by regex — and
+    that classification reads `route_text` (the message proper) rather than
+    `text` itself, so a completion report's attached log tail — which quotes
+    task/feature names from unrelated work almost every time — can never steer
+    the destination.
+    """
     env = load_env() if env is None else env
     base, token = env.get("QUORUM_CHAT_URL"), env.get("QUORUM_PIPE_TOKEN")
     if not base or not token or not project:
         return False
     if feature is None:
-        feature = resolve_feature(project, text, workspace=workspace)
+        if channel is not None:
+            feature = feature_from_channel(channel)
+        else:
+            feature = resolve_feature(project, route_text if route_text is not None else text,
+                                       workspace=workspace)
     base = base.rstrip("/")
     url = (
         f"{base}/v1/chat/projects/{project}/messages"

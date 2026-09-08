@@ -599,10 +599,29 @@ def _clear_project_pin(root, src):
     log(f"plugin update: {os.path.basename(root)} project pin dropped; resolves to the {src} user install")
 
 
+def _freshen_plugin_checkout(pd):
+    """Fast-forward the plugin checkout before its version is read. The source
+    version is what sync_plugin compares the installed cache against, so a merged
+    plugin PR nobody pulled was invisible until someone typed `pull-all` — the one
+    real job that keyword had. Clean tree and fast-forward only, never clobber."""
+    try:
+        dirty = subprocess.run(["git", "-C", pd, "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True, timeout=20)
+        if dirty.returncode != 0 or dirty.stdout.strip():
+            return
+        r = subprocess.run(["git", "-C", pd, "pull", "-q", "--ff-only"],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            log(f"plugin checkout pull skipped (non-fatal): {r.stderr.strip()[:160]}")
+    except Exception as e:
+        log(f"plugin checkout pull errored (non-fatal): {e}")
+
+
 def _source_plugin_version(cfg):
     pd = _maw_plugin_dir(cfg)
     if not pd:
         return None
+    _freshen_plugin_checkout(pd)
     try:
         return json.load(open(os.path.join(pd, ".claude-plugin", "plugin.json")))["version"]
     except Exception:

@@ -1299,4 +1299,29 @@ assert calls == [], calls
 PY
 echo "[smoke] project pin sweep ok"
 
+# --- The plugin checkout is fast-forwarded before its version is read (clean
+# tree + ff-only; a dirty tree is left alone), replacing the one real job the
+# Telegram pull-all keyword had.
+python3 - "$ORCH" "$TMP" <<'PY' || fail "plugin checkout freshen checks failed"
+import os, subprocess, sys
+orch, tmp = sys.argv[1], sys.argv[2]
+sys.path.insert(0, orch)
+import daemon
+seen = []
+class R:
+    def __init__(self, rc, out=""): self.returncode = rc; self.stdout = out; self.stderr = ""
+def run_clean(cmd, **kw):
+    seen.append(cmd); return R(0, "")
+daemon.subprocess.run = run_clean
+daemon._freshen_plugin_checkout("/tmp/pd")
+assert any("pull" in c and "--ff-only" in c for c in seen), seen
+seen.clear()
+def run_dirty(cmd, **kw):
+    seen.append(cmd); return R(0, " M daemon.py\n") if "status" in cmd else R(0, "")
+daemon.subprocess.run = run_dirty
+daemon._freshen_plugin_checkout("/tmp/pd")
+assert not any("pull" in c for c in seen), "a dirty checkout must not be pulled"
+PY
+echo "[smoke] plugin checkout freshen ok"
+
 echo "SMOKE OK"

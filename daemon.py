@@ -534,11 +534,69 @@ def _maw_plugin_dir(cfg):
     return os.path.dirname(s.rstrip("/")) if s else None
 
 
-def _installed_plugin_version():
+def _plugin_entries():
     try:
-        return json.load(open(INSTALLED_PLUGINS))["plugins"][INTENTPIPE_PLUGIN_ID][0]["version"]
+        return json.load(open(INSTALLED_PLUGINS))["plugins"][INTENTPIPE_PLUGIN_ID]
     except Exception:
+        return []
+
+
+def _installed_plugin_version():
+    """The user-scope install — the one every project resolves to unless a
+    project-scope pin shadows it (see _stale_project_pins)."""
+    entries = _plugin_entries()
+    user = [e for e in entries if e.get("scope") == "user"]
+    try:
+        return (user or entries)[0]["version"]
+    except (IndexError, KeyError):
         return None
+
+
+def _stale_project_pins(src):
+    """Project-scope install records behind the source version. A session started
+    inside a project whose .claude/settings.json enables the plugin re-creates such
+    a pin at whatever version is current that moment, and the pin then shadows
+    every later user-scope update for that project only — which is how a build
+    kept running 0.41.1 skills two releases after the box was updated."""
+    return [(e.get("projectPath"), e.get("version"))
+            for e in _plugin_entries()
+            if e.get("scope") == "project" and e.get("projectPath") and e.get("version") != src]
+
+
+def _run_quiet(cmd, cwd=None, timeout=180):
+    try:
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        log(f"plugin step errored (non-fatal): {' '.join(cmd)}: {e}")
+        return None
+
+
+def _clear_project_pin(root, src):
+    """Bring one project's pin to `src`: first an in-place project-scope update,
+    and if the record is still behind, drop the pin (keeping the cache) so the
+    project falls through to the user install — restoring the enabledPlugins
+    line the uninstall clears from .claude/settings.json (from git when tracked,
+    rewritten otherwise)."""
+    _run_quiet(["claude", "plugin", "update", "-s", "project", INTENTPIPE_PLUGIN_ID], cwd=root)
+    if not any(os.path.realpath(p) == os.path.realpath(root) for p, _ in _stale_project_pins(src)):
+        log(f"plugin update: {os.path.basename(root)} project pin → {src}")
+        return
+    _run_quiet(["claude", "plugin", "uninstall", "-s", "project", "--keep-data", INTENTPIPE_PLUGIN_ID], cwd=root)
+    settings = os.path.join(root, ".claude", "settings.json")
+    tracked = _run_quiet(["git", "-C", root, "ls-files", "--error-unmatch", ".claude/settings.json"], timeout=20)
+    if tracked is not None and tracked.returncode == 0:
+        _run_quiet(["git", "-C", root, "restore", ".claude/settings.json"], timeout=20)
+    else:
+        try:
+            data = json.load(open(settings)) if os.path.isfile(settings) else {}
+        except ValueError:
+            data = {}
+        data.setdefault("enabledPlugins", {})[INTENTPIPE_PLUGIN_ID] = True
+        os.makedirs(os.path.dirname(settings), exist_ok=True)
+        with open(settings, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+    log(f"plugin update: {os.path.basename(root)} project pin dropped; resolves to the {src} user install")
 
 
 def _source_plugin_version(cfg):
@@ -559,18 +617,22 @@ def sync_plugin(cfg):
     best-effort, never blocks a trigger. This is what keeps the project scaffolds
     auto-updated to a new intentpipe version."""
     src = _source_plugin_version(cfg)
-    inst = _installed_plugin_version()
-    if not src or src == inst:
+    if not src:
         return
-    log(f"plugin update: installed {inst} → source {src}; reinstalling cache")
-    for cmd in (["claude", "plugin", "marketplace", "update", INTENTPIPE_MARKETPLACE],
-                ["claude", "plugin", "update", INTENTPIPE_PLUGIN_ID]):
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-            if r.returncode != 0:
+    inst = _installed_plugin_version()
+    if src != inst:
+        log(f"plugin update: installed {inst} → source {src}; reinstalling cache")
+        for cmd in (["claude", "plugin", "marketplace", "update", INTENTPIPE_MARKETPLACE],
+                    ["claude", "plugin", "update", INTENTPIPE_PLUGIN_ID]):
+            r = _run_quiet(cmd)
+            if r is not None and r.returncode != 0:
                 log(f"plugin update step failed (non-fatal): {r.stderr.strip()[:200]}")
-        except Exception as e:
-            log(f"plugin update step errored (non-fatal): {e}")
+    # Always, not only when the user install moved: a project pin goes stale on
+    # its own (a session re-creates it at the then-current version), so the
+    # sweep is what keeps every project on the version the box runs.
+    for root, ver in _stale_project_pins(src):
+        log(f"plugin update: {os.path.basename(root)} pinned at {ver} (project scope) behind {src}")
+        _clear_project_pin(root, src)
 
 
 def load_logmine_offers():

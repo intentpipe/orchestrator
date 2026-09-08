@@ -1246,4 +1246,57 @@ grep -q 'EnvironmentFile=%h/.agent-orchestrator/claude-auth.env' "$UNIT" \
 grep -q 'credentials.json' "$UNIT" && fail "the unit must not point at ~/.claude/.credentials.json"
 echo "[smoke] claude auth source ok"
 
+# --- Project-scope plugin pins: a session started inside a project re-creates a
+# project-scope install record at the then-current version, and that record
+# shadows every later user-scope update for that project. sync_plugin must sweep
+# them on every trigger — update in place, and drop the pin (restoring the
+# enabledPlugins line the uninstall clears) when the update leaves it behind.
+python3 - "$ORCH" "$TMP" <<'PY' || fail "project pin sweep checks failed"
+import json, os, sys
+orch, tmp = sys.argv[1], sys.argv[2]
+sys.path.insert(0, orch)
+import daemon
+box = os.path.join(tmp, "pins-box"); os.makedirs(box)
+a = os.path.join(box, "alpha"); b = os.path.join(box, "beta"); os.makedirs(a); os.makedirs(b)
+inst = os.path.join(box, "installed_plugins.json")
+def write(entries):
+    json.dump({"version": 2, "plugins": {daemon.INTENTPIPE_PLUGIN_ID: entries}}, open(inst, "w"))
+write([{"scope": "user", "version": "9.9.9"},
+       {"scope": "project", "projectPath": a, "version": "9.9.8"},
+       {"scope": "project", "projectPath": b, "version": "9.9.7"}])
+daemon.INSTALLED_PLUGINS = inst
+daemon._source_plugin_version = lambda cfg: "9.9.9"
+calls = []
+class R:
+    def __init__(self, rc): self.returncode = rc; self.stderr = ""
+def fake_run(cmd, cwd=None, timeout=180):
+    calls.append((cmd, cwd))
+    if cmd[:3] == ["claude", "plugin", "update"] and "-s" in cmd and cwd == a:
+        write([{"scope": "user", "version": "9.9.9"},
+               {"scope": "project", "projectPath": a, "version": "9.9.9"},
+               {"scope": "project", "projectPath": b, "version": "9.9.7"}])   # alpha updates in place
+        return R(0)
+    if cmd[:3] == ["claude", "plugin", "uninstall"] and cwd == b:
+        write([{"scope": "user", "version": "9.9.9"},
+               {"scope": "project", "projectPath": a, "version": "9.9.9"}])   # beta's pin is gone
+        return R(0)
+    if cmd[:2] == ["git", "-C"] and "ls-files" in cmd:
+        return R(1)   # beta's settings.json is not tracked → rewritten, not restored
+    return R(0)
+daemon._run_quiet = fake_run
+daemon.sync_plugin({})
+assert not any(c[0][:3] == ["claude", "plugin", "marketplace"] for c in calls), "user install current → no user-scope reinstall"
+assert (["claude", "plugin", "update", "-s", "project", daemon.INTENTPIPE_PLUGIN_ID], a) in calls, calls
+assert not any(c[0][2] == "uninstall" and c[1] == a for c in calls), "alpha updated in place, must not be uninstalled"
+assert (["claude", "plugin", "uninstall", "-s", "project", "--keep-data", daemon.INTENTPIPE_PLUGIN_ID], b) in calls, calls
+assert not any("restore" in c[0] for c in calls), "untracked settings must not be git-restored"
+settings = json.load(open(os.path.join(b, ".claude", "settings.json")))
+assert settings["enabledPlugins"][daemon.INTENTPIPE_PLUGIN_ID] is True, settings
+assert daemon._stale_project_pins("9.9.9") == [], daemon._stale_project_pins("9.9.9")
+# a second sweep with nothing stale runs no plugin command at all
+calls.clear(); daemon.sync_plugin({})
+assert calls == [], calls
+PY
+echo "[smoke] project pin sweep ok"
+
 echo "SMOKE OK"

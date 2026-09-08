@@ -1222,6 +1222,12 @@ open(os.path.join(daemon.JOBS_DIR, "t-note.stale"), "w").write("")
 daemon.pickup_tickets(cfg, FakeAPI())
 assert os.path.exists(os.path.join(daemon.JOBS_DIR, "t-note.stale")), "markers are left alone"
 
+# Picked up once per poll cycle, like reap_jobs and launch_due_resumes — a
+# ticket nobody polls for is a run that never starts.
+import inspect
+loop = inspect.getsource(daemon.run)
+assert "pickup_tickets(cfg, api)" in loop, "the poll loop must pick tickets up every cycle"
+
 # Telegram is untouched by all of this: 🧠 still spawns exactly what it did.
 spawns.clear()
 api = FakeAPI()

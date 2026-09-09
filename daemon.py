@@ -853,14 +853,19 @@ def run_logmine(cfg, api, thread_id, react, fail):
     return f"logmine: {len(proposals)} proposal(s) posted"
 
 
-def start_logmine_implement(lm, cfg, api, key=None, by=None):
+def start_logmine_implement(lm, cfg, api, key=None, by=None, reply_channel=None):
     """A reaction (or a Quorum Apply card's ticket, task 0074) on a logmine
     proposal message: implement it headless (branch + PR) in its target repo
     with --dangerously-skip-permissions. Scope is enforced by the implement
     prompt (orchestrator or plugin only); reap_jobs posts the result
     including the PR URL (report_tail), and — when `key` names the offer
     file's own entry — writes the same outcome into it, which is what
-    Quorum's Apply card reconciles against.
+    Quorum's Apply card reconciles against. `reply_channel` is the job
+    ticket's own `reply_to.channel` (task 0069/0071): when the press came
+    from Quorum, reap_jobs honours it outright instead of classifying the
+    completion by regex, so the PR link lands back in the same card's channel
+    rather than wherever a slug like the proposal's own title happens to
+    resolve.
     """
     p = lm.get("proposal", {})
     topic = lm.get("topic")
@@ -881,6 +886,8 @@ def start_logmine_implement(lm, cfg, api, key=None, by=None):
         return f"skip: logmine implement already running for {slug}"
     prompt = open(LOGMINE_IMPLEMENT).read() + "\n\n=== PROPOSAL ===\n" + json.dumps(p, indent=2)
     track = {"name": slug, "action": "logmine", "topic": topic, "report_tail": True}
+    if reply_channel is not None:
+        track["reply_channel"] = reply_channel
     if key is not None:
         track.update(offer_source="logmine", offer_key=key, offer_by=by)
     try:
@@ -958,21 +965,20 @@ def offer_retro_proposals(job, cfg, api):
                 + (f"confidence: {conf}\n" if conf else "")
                 + f"\n{fname}\n\nReact to this message to apply it (branch + PR in the intentpipe repo).")
         resp = api.send_message(cfg["chat_id"], body, job.get("topic"))
-        # Retro/logmine offers are project-scoped by criterion 1 even though a
-        # proposal's own title routinely names a task ("task 0069 spawned
-        # twice") — route on a title-free line so that never misroutes it, and
-        # honour the ticket's own reply_channel when a retro was started from
-        # Quorum (criterion 2), exactly as reap_jobs does for completions.
-        quorum_report.report(job["name"], body, workspace=job.get("workspace"),
-                             channel=job.get("reply_channel"),
-                             route_text=f"retro proposal for {job['name']}")
         mid = (resp or {}).get("result", {}).get("message_id")
         if mid is not None:
             key = str(mid)
             offers[key] = {"file": path, "name": job["name"], "topic": job.get("topic")}
             # Quorum's own Apply card (task 0074), same offer key as the
             # Telegram message — the evidence line is retro's own filename
-            # when the proposal names no `evidence` field of its own.
+            # when the proposal names no `evidence` field of its own. This is
+            # the only Quorum-side post for this proposal (no plain-text
+            # fan-out alongside it — logmine's loop below posts only its own
+            # card the same way, and a body already means "react to apply"
+            # for Telegram, which reads oddly once it is a button instead).
+            # Route-text honours the ticket's own reply_channel when a retro
+            # was started from Quorum, exactly as reap_jobs does for
+            # completions.
             offers[key]["quorum_message_id"] = quorum_report.report_structured(
                 job["name"],
                 _proposal_offer_payload("retro", key, title, evidence=fname, confidence=conf),
@@ -984,13 +990,13 @@ def offer_retro_proposals(job, cfg, api):
     return f"retro: {len(new[:6])} proposal(s) offered for {job['name']}"
 
 
-def start_retro_apply(ro, cfg, api, key=None, by=None):
+def start_retro_apply(ro, cfg, api, key=None, by=None, reply_channel=None):
     """A reaction (or a Quorum Apply card's ticket, task 0074) on a retro
     proposal message: apply it headless in the intentpipe repo (branch + PR)
     — the same shape as logmine's implement. The retro skill's human gate
     survives as the reaction plus the PR merge; nothing lands on a default
-    branch. `key`/`by` are the same offer-file bookkeeping `start_logmine_implement`
-    takes.
+    branch. `key`/`by`/`reply_channel` are the same offer-file bookkeeping and
+    completion routing `start_logmine_implement` takes.
     """
     topic = ro.get("topic")
     path = ro.get("file", "")
@@ -1015,6 +1021,8 @@ def start_retro_apply(ro, cfg, api, key=None, by=None):
         return f"skip: retro apply already running for {slug}"
     prompt = open(RETRO_IMPLEMENT).read() + "\n\n=== PROPOSAL ===\n" + open(path).read()
     track = {"name": slug, "action": "retro-apply", "topic": topic, "report_tail": True}
+    if reply_channel is not None:
+        track["reply_channel"] = reply_channel
     if key is not None:
         track.update(offer_source="retro", offer_key=key, offer_by=by)
     try:
@@ -1677,11 +1685,11 @@ def _run_ticket(ticket, cfg, api, registry):
             ro = load_retro_offers().get(offer_id) if offer_id else None
             if ro is None:
                 return fail(f"skip: no retro offer {offer_id!r}", "that retro proposal is no longer offered")
-            return start_retro_apply(ro, cfg, api, key=offer_id, by=who)
+            return start_retro_apply(ro, cfg, api, key=offer_id, by=who, reply_channel=reply_channel)
         lm = load_logmine_offers().get(offer_id) if offer_id else None
         if lm is None:
             return fail(f"skip: no logmine offer {offer_id!r}", "that logmine proposal is no longer offered")
-        return start_logmine_implement(lm, cfg, api, key=offer_id, by=who)
+        return start_logmine_implement(lm, cfg, api, key=offer_id, by=who, reply_channel=reply_channel)
     return fail(f"skip: unknown action {action!r}", f"{action!r} is not a command I have")
 
 

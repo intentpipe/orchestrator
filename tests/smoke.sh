@@ -1525,29 +1525,85 @@ row = tail(1)[0]
 assert row["path"] == "/v1/chat/features/proj/shiny-thing/messages", \
     f"an actual job ticket's own reply_to.channel must reach the completion report: {row}"
 
-# --- regression (0071 review round 2, nit): a retro offer's title routinely
-# names a task ("task 1234 ..."), but criterion 1 classes retro/logmine offers
-# as project-scoped — offer_retro_proposals must not let the proposal body
-# steer it there by regex, and must honour the job's own reply_channel when a
-# retro was started from Quorum.
+# --- regression (0071 review round 2, nit; 0074 review round 1, blocking #2):
+# a retro offer's title routinely names a task ("task 1234 ..."), but
+# criterion 1 classes retro/logmine offers as project-scoped — and
+# offer_retro_proposals now posts exactly ONE Quorum message per proposal
+# (the proposal_offer card, task 0074; the plain-text fan-out that used to
+# run alongside it is gone, matching logmine's own loop, which never had
+# one) — that card must not let the proposal body steer its destination by
+# regex, and must honour the job's own reply_channel when a retro was
+# started from Quorum.
+class _MidAPI:
+    def __init__(self):
+        self._mid = 0
+
+    def send_message(self, chat, text, thread_id=None):
+        self._mid += 1
+        return {"result": {"message_id": self._mid}}
+
+
 retro_ws = os.path.join(tmp, "retro-ws"); os.makedirs(os.path.join(retro_ws, "retro"))
 open(os.path.join(retro_ws, "retro", "2026-01-01-x.md"), "w").write(
     "# task 1234 spawned twice\n\n## Confidence\nhigh\n")
 posted.clear()
-daemon.quorum_report.report = real_report
 daemon.load_retro_offers, daemon.save_retro_offers = lambda: {}, lambda o: None
 daemon.offer_retro_proposals(
-    {"name": "proj", "workspace": retro_ws, "topic": 5, "retro_before": []}, {"chat_id": "-100"}, FakeAPI())
+    {"name": "proj", "workspace": retro_ws, "topic": 5, "retro_before": []}, {"chat_id": "-100"}, _MidAPI())
 row = tail(1)[0]
 assert row["path"] == "/v1/chat/projects/proj/messages", \
     f"a retro offer naming a task must still be project-scoped: {row}"
+assert row["body"]["kind"] == "proposal_offer", \
+    f"a retro offer must post exactly one card, no plain-text fan-out alongside it: {row}"
 
 daemon.offer_retro_proposals(
     {"name": "proj", "workspace": retro_ws, "topic": 5, "retro_before": [],
-     "reply_channel": "feature:proj:shiny-thing"}, {"chat_id": "-100"}, FakeAPI())
+     "reply_channel": "feature:proj:shiny-thing"}, {"chat_id": "-100"}, _MidAPI())
 row = tail(1)[0]
 assert row["path"] == "/v1/chat/features/proj/shiny-thing/messages", \
     f"a retro offer must honour the job's own reply_channel: {row}"
+
+# --- regression (0074 review round 1, blocking #1): a Quorum Apply card's
+# press is a job ticket whose action is "logmine-implement"/"retro-apply" —
+# _run_ticket must thread that ticket's own reply_to.channel through to
+# start_logmine_implement/start_retro_apply's track, exactly as it already
+# does for dispatch()'s actions, so the finished run's PR link lands back on
+# the card's own channel and not wherever the proposal's title happens to
+# resolve.
+daemon.JOBS_DIR = os.path.join(tmp, "e2e-jobs-2"); os.makedirs(daemon.JOBS_DIR)
+daemon._JOBS[:] = []
+daemon.load_logmine_offers = lambda: {
+    "77": {"proposal": {"title": "task 1234 spawned twice", "repo": "orchestrator",
+                        "problem": "p", "change": "c", "evidence": "e", "severity": "high"},
+           "topic": 5}
+}
+daemon.save_logmine_offers = lambda o: None
+lm_tracked = []
+def _lm_spawn(cmd, cwd, base, track=None):
+    lm_tracked.append(track)
+    if track is not None:
+        daemon._JOBS.append({"popen": FakePopen(0),
+                              "log": os.path.join(daemon.RUN_DIR, "lm-e2e.log"), **track})
+    return 6666
+open(os.path.join(daemon.RUN_DIR, "lm-e2e.log"), "w").write("PR: https://github.com/x/y/pull/7\n")
+daemon.spawn_detached, daemon.sync_plugin = _lm_spawn, lambda cfg: None
+with open(os.path.join(daemon.JOBS_DIR, "lm-ticket.json"), "w") as fh:
+    json.dump({"project": "proj", "action": "logmine-implement", "args": ["77"],
+               "reply_to": {"channel": "feature:proj:shiny-thing", "requester": "Ada"}}, fh)
+try:
+    daemon.pickup_tickets({"chat_id": "-100"}, FakeAPI())
+finally:
+    daemon.spawn_detached, daemon.sync_plugin = real_spawn_detached, real_sync_plugin
+assert lm_tracked and lm_tracked[0].get("reply_channel") == "feature:proj:shiny-thing", lm_tracked
+daemon.reap_jobs({"chat_id": "-100"}, FakeAPI())
+row = tail(1)[0]
+# The feature segment is what proves the ticket's own reply_to.channel was
+# honoured (not lost, not reclassified by regex over the completion text);
+# the project segment is `j["name"]` — a logmine job's own change slug, the
+# same pre-existing quirk `offer_retro_proposals`'s "proj" case above does
+# not share, and out of this round's scope.
+assert row["path"].endswith("/shiny-thing/messages") and "/features/" in row["path"], \
+    f"a Quorum-pressed apply's own reply_to.channel must reach the completion report: {row}"
 
 # --- checkout.py's _post also fans into Quorum, addressed by the offer's own
 # project + workspace

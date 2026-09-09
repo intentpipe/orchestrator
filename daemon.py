@@ -66,6 +66,7 @@ Run:  orchestrator/daemon.py            # long-poll forever (systemd unit ships 
 """
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -830,36 +831,67 @@ def run_logmine(cfg, api, thread_id, react, fail):
         resp = api.send_message(cfg["chat_id"], body, thread_id)
         mid = (resp or {}).get("result", {}).get("message_id")
         if mid is not None:
-            offers[str(mid)] = {"proposal": p, "topic": thread_id}
+            key = str(mid)
+            offers[key] = {"proposal": p, "topic": thread_id}
+            # Quorum's own Apply card (task 0074): the same proposal, as a
+            # typed card in the pipeline's own project chat (logmine mines
+            # the orchestrator/plugin's own logs, not a registered project's
+            # — QUORUM_SELF_PROJECT is where the pipeline's own work is
+            # tracked). `offer_id` is this file's own key, so a press
+            # resolves the very entry a Telegram reaction would.
+            offers[key]["quorum_message_id"] = quorum_report.report_structured(
+                QUORUM_SELF_PROJECT,
+                _proposal_offer_payload(
+                    "logmine", key, p.get("title", "(untitled)"),
+                    problem=p.get("problem"), change=p.get("change"),
+                    evidence=p.get("evidence"), repo=p.get("repo"), severity=p.get("severity"),
+                ),
+                channel=f"project:{QUORUM_SELF_PROJECT}",
+            )
     save_logmine_offers(offers)
     react("👌")
     return f"logmine: {len(proposals)} proposal(s) posted"
 
 
-def start_logmine_implement(lm, cfg, api):
-    """A reaction on a logmine proposal message: implement it headless (branch +
-    PR) in its target repo with --dangerously-skip-permissions. Scope is enforced
-    by the implement prompt (orchestrator or plugin only); reap_jobs posts the
-    result including the PR URL (report_tail)."""
+def start_logmine_implement(lm, cfg, api, key=None, by=None):
+    """A reaction (or a Quorum Apply card's ticket, task 0074) on a logmine
+    proposal message: implement it headless (branch + PR) in its target repo
+    with --dangerously-skip-permissions. Scope is enforced by the implement
+    prompt (orchestrator or plugin only); reap_jobs posts the result
+    including the PR URL (report_tail), and — when `key` names the offer
+    file's own entry — writes the same outcome into it, which is what
+    Quorum's Apply card reconciles against.
+    """
     p = lm.get("proposal", {})
     topic = lm.get("topic")
     repo = p.get("repo")
     cwd = ORCH_DIR if repo == "orchestrator" else _maw_plugin_dir(cfg)
     if not cwd or not os.path.isdir(cwd):
         api.send_message(cfg["chat_id"], f"⚠️ logmine: unknown target repo '{repo}' — can't implement.", topic)
+        if key is not None:
+            _mark_offer_status("logmine", key, {"state": "failed", "reason": f"unknown target repo {repo!r}", "by": by})
         return f"logmine implement: bad repo {repo}"
     slug = _slug(p.get("title", "change"))
     base = f"logmine.{slug}"
     if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
         api.send_message(cfg["chat_id"], f"⏳ already implementing “{p.get('title')}”.", topic)
+        if key is not None:
+            _mark_offer_status("logmine", key,
+                               {"state": "failed", "reason": f"already implementing {p.get('title')!r}", "by": by})
         return f"skip: logmine implement already running for {slug}"
     prompt = open(LOGMINE_IMPLEMENT).read() + "\n\n=== PROPOSAL ===\n" + json.dumps(p, indent=2)
+    track = {"name": slug, "action": "logmine", "topic": topic, "report_tail": True}
+    if key is not None:
+        track.update(offer_source="logmine", offer_key=key, offer_by=by)
     try:
-        pid = spawn_detached(["claude", "-p", prompt, "--dangerously-skip-permissions"], cwd, base,
-                             track={"name": slug, "action": "logmine", "topic": topic, "report_tail": True})
+        pid = spawn_detached(["claude", "-p", prompt, "--dangerously-skip-permissions"], cwd, base, track=track)
     except OSError as e:
         api.send_message(cfg["chat_id"], f"⚠️ couldn't start implement: {e}", topic)
+        if key is not None:
+            _mark_offer_status("logmine", key, {"state": "failed", "reason": f"couldn't start implement: {e}", "by": by})
         return f"error: logmine implement spawn failed: {e}"
+    if key is not None:
+        _mark_offer_status("logmine", key, {"state": "applying", "by": by})
     api.send_message(cfg["chat_id"], f"🛠 implementing “{p.get('title')}” in {repo} — a PR will follow.", topic)
     return f"logmine implement started for {slug} (pid {pid})"
 
@@ -936,39 +968,83 @@ def offer_retro_proposals(job, cfg, api):
                              route_text=f"retro proposal for {job['name']}")
         mid = (resp or {}).get("result", {}).get("message_id")
         if mid is not None:
-            offers[str(mid)] = {"file": path, "name": job["name"], "topic": job.get("topic")}
+            key = str(mid)
+            offers[key] = {"file": path, "name": job["name"], "topic": job.get("topic")}
+            # Quorum's own Apply card (task 0074), same offer key as the
+            # Telegram message — the evidence line is retro's own filename
+            # when the proposal names no `evidence` field of its own.
+            offers[key]["quorum_message_id"] = quorum_report.report_structured(
+                job["name"],
+                _proposal_offer_payload("retro", key, title, evidence=fname, confidence=conf),
+                workspace=job.get("workspace"),
+                channel=job.get("reply_channel"),
+                route_text=f"retro proposal for {job['name']}",
+            )
     save_retro_offers(offers)
     return f"retro: {len(new[:6])} proposal(s) offered for {job['name']}"
 
 
-def start_retro_apply(ro, cfg, api):
-    """A reaction on a retro proposal message: apply it headless in the
-    intentpipe repo (branch + PR) — the same shape as logmine's implement.
-    The retro skill's human gate survives as the reaction plus the PR merge;
-    nothing lands on a default branch."""
+def start_retro_apply(ro, cfg, api, key=None, by=None):
+    """A reaction (or a Quorum Apply card's ticket, task 0074) on a retro
+    proposal message: apply it headless in the intentpipe repo (branch + PR)
+    — the same shape as logmine's implement. The retro skill's human gate
+    survives as the reaction plus the PR merge; nothing lands on a default
+    branch. `key`/`by` are the same offer-file bookkeeping `start_logmine_implement`
+    takes.
+    """
     topic = ro.get("topic")
     path = ro.get("file", "")
     cwd = _maw_plugin_dir(cfg)
     if not cwd or not os.path.isdir(cwd):
         api.send_message(cfg["chat_id"], "⚠️ retro: INTENTPIPE_SCRIPTS unset or missing — can't apply.", topic)
+        if key is not None:
+            _mark_offer_status("retro", key, {"state": "failed", "reason": "INTENTPIPE_SCRIPTS unset or missing", "by": by})
         return "retro apply: no plugin dir"
     if not os.path.isfile(path):
         api.send_message(cfg["chat_id"], f"⚠️ retro: proposal file is gone: {path}", topic)
+        if key is not None:
+            _mark_offer_status("retro", key, {"state": "failed", "reason": f"proposal file is gone: {path}", "by": by})
         return f"retro apply: missing {path}"
     slug = _slug(os.path.splitext(os.path.basename(path))[0])
     base = f"retro-apply.{slug}"
     if pid_alive(os.path.join(RUN_DIR, base + ".pid")):
         api.send_message(cfg["chat_id"], f"⏳ already applying {os.path.basename(path)}.", topic)
+        if key is not None:
+            _mark_offer_status("retro", key,
+                               {"state": "failed", "reason": f"already applying {os.path.basename(path)}", "by": by})
         return f"skip: retro apply already running for {slug}"
     prompt = open(RETRO_IMPLEMENT).read() + "\n\n=== PROPOSAL ===\n" + open(path).read()
+    track = {"name": slug, "action": "retro-apply", "topic": topic, "report_tail": True}
+    if key is not None:
+        track.update(offer_source="retro", offer_key=key, offer_by=by)
     try:
-        pid = spawn_detached(["claude", "-p", prompt, "--dangerously-skip-permissions"], cwd, base,
-                             track={"name": slug, "action": "retro-apply", "topic": topic, "report_tail": True})
+        pid = spawn_detached(["claude", "-p", prompt, "--dangerously-skip-permissions"], cwd, base, track=track)
     except OSError as e:
         api.send_message(cfg["chat_id"], f"⚠️ couldn't start the apply: {e}", topic)
+        if key is not None:
+            _mark_offer_status("retro", key, {"state": "failed", "reason": f"couldn't start the apply: {e}", "by": by})
         return f"error: retro apply spawn failed: {e}"
+    if key is not None:
+        _mark_offer_status("retro", key, {"state": "applying", "by": by})
     api.send_message(cfg["chat_id"], f"🛠 applying {os.path.basename(path)} — a PR will follow.", topic)
     return f"retro apply started for {slug} (pid {pid})"
+
+
+def _mark_offer_status(source, key, status):
+    """Write `status` into one retro/logmine offer entry — the daemon's own
+    record of an Apply card's applying/applied/failed state (task 0074),
+    read back by quorum-core's reconcile route. A missing entry (the offer
+    was pruned, or `key` names none) is silently skipped: this function
+    reports on an offer, it never invents one."""
+    load, save = (load_retro_offers, save_retro_offers) if source == "retro" \
+        else (load_logmine_offers, save_logmine_offers)
+    offers = load()
+    entry = offers.get(key)
+    if not isinstance(entry, dict):
+        return
+    entry["status"] = status
+    offers[key] = entry
+    save(offers)
 
 
 def process_reaction(r, cfg, api):
@@ -987,10 +1063,10 @@ def process_reaction(r, cfg, api):
     if not offer:
         lm = load_logmine_offers().get(mid)
         if lm:
-            return start_logmine_implement(lm, cfg, api)
+            return start_logmine_implement(lm, cfg, api, key=mid, by="telegram")
         ro = load_retro_offers().get(mid)
         if ro:
-            return start_retro_apply(ro, cfg, api)
+            return start_retro_apply(ro, cfg, api, key=mid, by="telegram")
         return f"reaction on non-offer message {mid}, ignored"
     base = os.path.join(RUN_DIR, f"{offer['name']}.checkout.pid")
     if pid_alive(base):
@@ -1163,6 +1239,31 @@ _JOBS = []
 # verify that then passes), which fired a false 😱 on a clean 5-task loop — so
 # it is intentionally NOT a marker.
 REJECT_MARKERS = ("requires approval", "may only access")
+
+# A finished retro-apply/logmine-implement's own PR, read off its log tail —
+# the same text `report_tail` already surfaces to Telegram, but Quorum's
+# Apply card (task 0074) needs the bare url, not a paragraph to search.
+PR_URL_RE = re.compile(r"https://github\.com/\S+/pull/\d+")
+
+# Where logmine's own proposals (they analyse the orchestrator/plugin's own
+# logs, not a registered project's) post as Quorum Apply cards: the project
+# that tracks the pipeline's own work, mirroring quorum-core's
+# `DEFAULT_SELF_PROJECT`.
+QUORUM_SELF_PROJECT = "quorum"
+
+
+def _proposal_offer_payload(source, offer_id, title, problem=None, change=None,
+                            evidence=None, repo=None, severity=None, confidence=None):
+    """A `proposal_offer` message body — task 0074's Apply card. Only the
+    fields that are actually there: `message.ex`'s optional fields reject an
+    empty string, so a blank one would 422 the whole post rather than simply
+    draw no row."""
+    payload = {"kind": "proposal_offer", "offer_id": offer_id, "source": source, "title": title}
+    for field, value in (("problem", problem), ("change", change), ("evidence", evidence),
+                         ("repo", repo), ("severity", severity), ("confidence", confidence)):
+        if value:
+            payload[field] = value
+    return payload
 
 
 def spawn_detached(cmd, cwd, base, track=None):
@@ -1353,6 +1454,9 @@ def reap_jobs(cfg, api):
             outcome = f"{header}:\n\n{tail}"
             api.send_message(cfg["chat_id"], outcome, j.get("topic"))
             quorum_report.report(j["name"], outcome, channel=j.get("reply_channel"), route_text=header)
+            if j.get("offer_key") is not None:   # task 0074: the Apply card reads this, not the ticket
+                _mark_offer_status(j["offer_source"], j["offer_key"],
+                                   {"state": "failed", "reason": why, "by": j.get("offer_by")})
             # The tail goes to the JOURNAL too, not just Telegram. A bare
             # "FAILED (rc=1)" is unreadable months later and — more to the point —
             # logmine reads this journal, so a failure with no context is a failure
@@ -1373,6 +1477,11 @@ def reap_jobs(cfg, api):
                 done = f"{header}\n\n{tail}"
             api.send_message(cfg["chat_id"], done, j.get("topic"))
             quorum_report.report(j["name"], done, channel=j.get("reply_channel"), route_text=header)
+            if j.get("offer_key") is not None:   # task 0074: the Apply card reads this, not the ticket
+                pr = PR_URL_RE.search(tail)
+                _mark_offer_status(j["offer_source"], j["offer_key"],
+                                   {"state": "applied", "pr_url": pr.group(0) if pr else None,
+                                    "by": j.get("offer_by")})
             log(f"{j['action']} for {j['name']} finished"
                 + (" (adopted, exit status unknown)" if j.get("adopted") else " ok"))
             # An adopted retro has no retro_before, so every pre-existing report would
@@ -1558,6 +1667,21 @@ def _run_ticket(ticket, cfg, api, registry):
         return offer_checkout(entry, cfg, api, topic, react, fail)
     if action == "relaunch":
         return launch_relaunch(entry, cfg, api, topic, react, fail, force="--force" in args)
+    if action in ("retro-apply", "logmine-implement"):
+        # A Quorum Apply card's press (task 0074): `args[0]` is the offer
+        # file's own key — quorum-core already checked it exists before
+        # writing this ticket, so a miss here is only a race with a pruned
+        # offer file, not the everyday path.
+        offer_id = args[0] if args else None
+        if action == "retro-apply":
+            ro = load_retro_offers().get(offer_id) if offer_id else None
+            if ro is None:
+                return fail(f"skip: no retro offer {offer_id!r}", "that retro proposal is no longer offered")
+            return start_retro_apply(ro, cfg, api, key=offer_id, by=who)
+        lm = load_logmine_offers().get(offer_id) if offer_id else None
+        if lm is None:
+            return fail(f"skip: no logmine offer {offer_id!r}", "that logmine proposal is no longer offered")
+        return start_logmine_implement(lm, cfg, api, key=offer_id, by=who)
     return fail(f"skip: unknown action {action!r}", f"{action!r} is not a command I have")
 
 

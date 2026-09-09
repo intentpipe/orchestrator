@@ -885,7 +885,14 @@ def start_logmine_implement(lm, cfg, api, key=None, by=None, reply_channel=None)
                                {"state": "failed", "reason": f"already implementing {p.get('title')!r}", "by": by})
         return f"skip: logmine implement already running for {slug}"
     prompt = open(LOGMINE_IMPLEMENT).read() + "\n\n=== PROPOSAL ===\n" + json.dumps(p, indent=2)
-    track = {"name": slug, "action": "logmine", "topic": topic, "report_tail": True}
+    # `track["name"]` is the change's own slug (what the log line and the
+    # Telegram ack name), never a Quorum project — logmine mines the
+    # orchestrator/plugin's own logs, so there is no per-proposal project to
+    # begin with. `quorum_project` is the separate field reap_jobs reports
+    # against: the pipeline's own self project, the same one the
+    # proposal_offer card itself was posted into.
+    track = {"name": slug, "action": "logmine", "topic": topic, "report_tail": True,
+             "quorum_project": QUORUM_SELF_PROJECT}
     if reply_channel is not None:
         track["reply_channel"] = reply_channel
     if key is not None:
@@ -1020,7 +1027,12 @@ def start_retro_apply(ro, cfg, api, key=None, by=None, reply_channel=None):
                                {"state": "failed", "reason": f"already applying {os.path.basename(path)}", "by": by})
         return f"skip: retro apply already running for {slug}"
     prompt = open(RETRO_IMPLEMENT).read() + "\n\n=== PROPOSAL ===\n" + open(path).read()
-    track = {"name": slug, "action": "retro-apply", "topic": topic, "report_tail": True}
+    # Same split as start_logmine_implement's: `track["name"]` names the
+    # change (the proposal file's own slug) for the log line and the
+    # Telegram ack, `quorum_project` is the real Quorum project (the retro
+    # offer's own `name`, task-independent) reap_jobs reports against.
+    track = {"name": slug, "action": "retro-apply", "topic": topic, "report_tail": True,
+             "quorum_project": ro.get("name")}
     if reply_channel is not None:
         track["reply_channel"] = reply_channel
     if key is not None:
@@ -1461,7 +1473,16 @@ def reap_jobs(cfg, api):
             header = f"{'⚠️' if sig else '😱'} {j['action']} for {j['name']} {why}"
             outcome = f"{header}:\n\n{tail}"
             api.send_message(cfg["chat_id"], outcome, j.get("topic"))
-            quorum_report.report(j["name"], outcome, channel=j.get("reply_channel"), route_text=header)
+            # `quorum_project` overrides `j["name"]` for retro-apply/logmine-
+            # implement (task 0074): their own `name` is the change's slug,
+            # never a Quorum project, so reporting against it unconditionally
+            # would post the PR line into a project literally named after the
+            # proposal — a bug round 1 of this review round caught even with
+            # reply_channel correctly threaded, since a real apply press's
+            # ticket channel is `project:<name>` (no feature segment at all)
+            # and only the project segment was ever wrong.
+            quorum_report.report(j.get("quorum_project", j["name"]), outcome,
+                                 channel=j.get("reply_channel"), route_text=header)
             if j.get("offer_key") is not None:   # task 0074: the Apply card reads this, not the ticket
                 _mark_offer_status(j["offer_source"], j["offer_key"],
                                    {"state": "failed", "reason": why, "by": j.get("offer_by")})
@@ -1484,7 +1505,11 @@ def reap_jobs(cfg, api):
             elif j.get("report_tail"):   # e.g. logmine implement — surface the PR URL
                 done = f"{header}\n\n{tail}"
             api.send_message(cfg["chat_id"], done, j.get("topic"))
-            quorum_report.report(j["name"], done, channel=j.get("reply_channel"), route_text=header)
+            # See the failure branch above: `quorum_project` (retro-apply's
+            # own project, logmine's self project) is the real destination,
+            # `j["name"]` alone is the change's slug.
+            quorum_report.report(j.get("quorum_project", j["name"]), done,
+                                 channel=j.get("reply_channel"), route_text=header)
             if j.get("offer_key") is not None:   # task 0074: the Apply card reads this, not the ticket
                 pr = PR_URL_RE.search(tail)
                 _mark_offer_status(j["offer_source"], j["offer_key"],

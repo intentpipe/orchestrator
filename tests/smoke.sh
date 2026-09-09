@@ -1548,28 +1548,42 @@ open(os.path.join(retro_ws, "retro", "2026-01-01-x.md"), "w").write(
     "# task 1234 spawned twice\n\n## Confidence\nhigh\n")
 posted.clear()
 daemon.load_retro_offers, daemon.save_retro_offers = lambda: {}, lambda o: None
+before = len(tail())
 daemon.offer_retro_proposals(
     {"name": "proj", "workspace": retro_ws, "topic": 5, "retro_before": []}, {"chat_id": "-100"}, _MidAPI())
-row = tail(1)[0]
+after = tail()
+# The count, not just the last line: round 1's fix restoring the deleted
+# duplicate plain-text post still read `tail(1)[0]` as the (correct) card
+# and passed — only a post-count check catches a reintroduced duplicate.
+assert len(after) - before == 1, \
+    f"a retro offer must post exactly one Quorum message per proposal, no duplicate fan-out: {after[before:]}"
+row = after[-1]
 assert row["path"] == "/v1/chat/projects/proj/messages", \
     f"a retro offer naming a task must still be project-scoped: {row}"
 assert row["body"]["kind"] == "proposal_offer", \
-    f"a retro offer must post exactly one card, no plain-text fan-out alongside it: {row}"
+    f"a retro offer's one post must be the card, not the old plain-text body: {row}"
 
+before = len(tail())
 daemon.offer_retro_proposals(
     {"name": "proj", "workspace": retro_ws, "topic": 5, "retro_before": [],
      "reply_channel": "feature:proj:shiny-thing"}, {"chat_id": "-100"}, _MidAPI())
-row = tail(1)[0]
+after = tail()
+assert len(after) - before == 1, f"still exactly one post: {after[before:]}"
+row = after[-1]
 assert row["path"] == "/v1/chat/features/proj/shiny-thing/messages", \
     f"a retro offer must honour the job's own reply_channel: {row}"
 
-# --- regression (0074 review round 1, blocking #1): a Quorum Apply card's
-# press is a job ticket whose action is "logmine-implement"/"retro-apply" —
-# _run_ticket must thread that ticket's own reply_to.channel through to
-# start_logmine_implement/start_retro_apply's track, exactly as it already
-# does for dispatch()'s actions, so the finished run's PR link lands back on
-# the card's own channel and not wherever the proposal's title happens to
-# resolve.
+# --- regression (0074 review round 1, blocking #1; round 2, still blocking):
+# a Quorum Apply card's press is a job ticket whose action is
+# "logmine-implement"/"retro-apply". quorum-core's own ticket writer
+# (jobs.py:_write) sets `reply_to.channel = project_topic(project)`, i.e.
+# always the plain `"project:<name>"` shape — a real apply press NEVER
+# produces a feature channel — so the regression must drive exactly that
+# shape and assert the FULL path: both that `_run_ticket` threads the
+# ticket's own reply_channel through (round 1's fix, still correct), AND
+# that the project segment names the real Quorum project and not
+# `j["name"]` (a logmine job's own change slug, or a retro job's own file
+# slug) — round 2's finding, now `quorum_project` in the track.
 daemon.JOBS_DIR = os.path.join(tmp, "e2e-jobs-2"); os.makedirs(daemon.JOBS_DIR)
 daemon._JOBS[:] = []
 daemon.load_logmine_offers = lambda: {
@@ -1588,22 +1602,61 @@ def _lm_spawn(cmd, cwd, base, track=None):
 open(os.path.join(daemon.RUN_DIR, "lm-e2e.log"), "w").write("PR: https://github.com/x/y/pull/7\n")
 daemon.spawn_detached, daemon.sync_plugin = _lm_spawn, lambda cfg: None
 with open(os.path.join(daemon.JOBS_DIR, "lm-ticket.json"), "w") as fh:
-    json.dump({"project": "proj", "action": "logmine-implement", "args": ["77"],
-               "reply_to": {"channel": "feature:proj:shiny-thing", "requester": "Ada"}}, fh)
+    json.dump({"project": "quorum", "action": "logmine-implement", "args": ["77"],
+               "reply_to": {"channel": "project:quorum", "requester": "Ada"}}, fh)
+daemon.load_registry = lambda: {"5": {"name": "proj", "workspace": ws},
+                                 "9": {"name": "quorum", "workspace": ws}}
 try:
     daemon.pickup_tickets({"chat_id": "-100"}, FakeAPI())
 finally:
     daemon.spawn_detached, daemon.sync_plugin = real_spawn_detached, real_sync_plugin
-assert lm_tracked and lm_tracked[0].get("reply_channel") == "feature:proj:shiny-thing", lm_tracked
+assert lm_tracked and lm_tracked[0].get("reply_channel") == "project:quorum", lm_tracked
+before = len(tail())
 daemon.reap_jobs({"chat_id": "-100"}, FakeAPI())
-row = tail(1)[0]
-# The feature segment is what proves the ticket's own reply_to.channel was
-# honoured (not lost, not reclassified by regex over the completion text);
-# the project segment is `j["name"]` — a logmine job's own change slug, the
-# same pre-existing quirk `offer_retro_proposals`'s "proj" case above does
-# not share, and out of this round's scope.
-assert row["path"].endswith("/shiny-thing/messages") and "/features/" in row["path"], \
-    f"a Quorum-pressed apply's own reply_to.channel must reach the completion report: {row}"
+after = tail()
+assert len(after) - before == 1, f"exactly one completion post: {after[before:]}"
+row = after[-1]
+assert row["path"] == "/v1/chat/projects/quorum/messages", \
+    f"a Quorum-pressed logmine apply's completion must post to the pipeline's own project, " \
+    f"not the change's own slug: {row}"
+
+# Same proof for retro-apply, whose Quorum project is the offer's own `name`
+# (a real registered project, unlike logmine's self project).
+daemon.JOBS_DIR = os.path.join(tmp, "e2e-jobs-3"); os.makedirs(daemon.JOBS_DIR)
+daemon._JOBS[:] = []
+retro_apply_ws = os.path.join(tmp, "retro-apply-ws")
+retro_proposal = os.path.join(retro_apply_ws, "retro-file.md")
+os.makedirs(retro_apply_ws)
+open(retro_proposal, "w").write("# task 1234 spawned twice\n")
+daemon.load_retro_offers = lambda: {"88": {"file": retro_proposal, "name": "proj", "topic": 5}}
+daemon.save_retro_offers = lambda o: None
+ra_tracked = []
+def _ra_spawn(cmd, cwd, base, track=None):
+    ra_tracked.append(track)
+    if track is not None:
+        daemon._JOBS.append({"popen": FakePopen(0),
+                              "log": os.path.join(daemon.RUN_DIR, "ra-e2e.log"), **track})
+    return 6667
+open(os.path.join(daemon.RUN_DIR, "ra-e2e.log"), "w").write("PR: https://github.com/x/y/pull/8\n")
+daemon.spawn_detached, daemon.sync_plugin = _ra_spawn, lambda cfg: None
+with open(os.path.join(daemon.JOBS_DIR, "ra-ticket.json"), "w") as fh:
+    json.dump({"project": "proj", "action": "retro-apply", "args": ["88"],
+               "reply_to": {"channel": "project:proj", "requester": "Ada"}}, fh)
+daemon.load_registry = lambda: {"5": {"name": "proj", "workspace": ws}}
+ra_plugdir = os.path.join(tmp, "ra-maw"); os.makedirs(os.path.join(ra_plugdir, "scripts"))
+try:
+    daemon.pickup_tickets({"chat_id": "-100", "maw_scripts": os.path.join(ra_plugdir, "scripts")}, FakeAPI())
+finally:
+    daemon.spawn_detached, daemon.sync_plugin = real_spawn_detached, real_sync_plugin
+assert ra_tracked and ra_tracked[0].get("reply_channel") == "project:proj", ra_tracked
+before = len(tail())
+daemon.reap_jobs({"chat_id": "-100"}, FakeAPI())
+after = tail()
+assert len(after) - before == 1, f"exactly one completion post: {after[before:]}"
+row = after[-1]
+assert row["path"] == "/v1/chat/projects/proj/messages", \
+    f"a Quorum-pressed retro apply's completion must post to its own project, " \
+    f"not the retro file's own slug: {row}"
 
 # --- checkout.py's _post also fans into Quorum, addressed by the offer's own
 # project + workspace

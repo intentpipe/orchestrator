@@ -33,8 +33,10 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import status  # reuse _projects and _git — one source of fleet truth
 import pull    # reuse _pull_one — one source of the "never clobber a dirty tree" rule
+import quorum_report  # task 0071: fan the report below into Quorum too
 
 PLUGIN_ID = "intentpipe@intentpipe"
 MARKETPLACE = "intentpipe"
@@ -42,6 +44,10 @@ CLAUDE_HOME = os.path.expanduser("~/.claude")
 INSTALLED = os.path.join(CLAUDE_HOME, "plugins", "installed_plugins.json")
 MARKETPLACES = os.path.join(CLAUDE_HOME, "plugins", "known_marketplaces.json")
 ORCH_HOME = os.environ.get("ORCH_HOME", os.path.expanduser("~/.agent-orchestrator"))
+# The report is scaffold-wide (every registered project's version, in one
+# line each), not one project's — it belongs in the project Quorum itself is
+# registered under (settings.py's DEFAULT_SELF_PROJECT on the chat side).
+QUORUM_SELF_PROJECT = os.environ.get("QUORUM_SELF_PROJECT", "quorum")
 TELEGRAM_ENV = os.environ.get("TELEGRAM_ENV", os.path.join(ORCH_HOME, "telegram.env"))
 
 
@@ -188,8 +194,10 @@ def build_report(check=False, do_pull=False, explicit_source=None):
 
 
 def post(text):
-    """Post the report into the scaffold topic — the maintainer inbox (README).
-    No topic id set → the group's General topic. Never fails its caller."""
+    """Post the report into the scaffold topic — the maintainer inbox (README)
+    — and, task 0071, into Quorum's own project chat. No topic id set → the
+    group's General topic. Never fails its caller."""
+    quorum_report.report(QUORUM_SELF_PROJECT, text)
     env = {}
     try:
         with open(TELEGRAM_ENV) as f:

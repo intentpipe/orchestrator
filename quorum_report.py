@@ -177,6 +177,48 @@ def report(project, text, feature=None, workspace=None, env=None, channel=None, 
         return False
 
 
+def report_structured(project, payload, feature=None, workspace=None, env=None, channel=None,
+                       route_text=None):
+    """Fan a typed card — a `proposal_offer`, not a line of text — into
+    Quorum's chat: the same destination logic `report` uses (an explicit
+    `feature`, then a ticket's own `channel`, then a regex classification of
+    `route_text`), but posting `payload` verbatim (with the forced `pipe`
+    attribution every post here carries) and answering the message id Quorum
+    minted, or `None` on any failure — nothing here raises, same posture as
+    `report`, so a card the daemon can't post never costs it the run.
+    """
+    try:
+        env = load_env() if env is None else env
+        base, token = env.get("QUORUM_CHAT_URL"), env.get("QUORUM_PIPE_TOKEN")
+        if not base or not token or not project:
+            return None
+        if feature is None:
+            if channel is not None:
+                feature = feature_from_channel(channel)
+            else:
+                feature = resolve_feature(project, route_text or "", workspace=workspace)
+        base = base.rstrip("/")
+        url = (
+            f"{base}/v1/chat/projects/{project}/messages"
+            if feature is None
+            else f"{base}/v1/chat/features/{project}/{feature}/messages"
+        )
+        body = json.dumps(dict(payload, author="pipe", agent=True)).encode()
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            answer = json.loads(response.read().decode())
+        message_id = answer.get("id") if isinstance(answer, dict) else None
+        return str(message_id) if message_id is not None else None
+    except Exception as error:
+        print(f"[quorum_report] structured post to {project} failed (non-fatal): {error}", file=sys.stderr)
+        return None
+
+
 def main(argv):
     """CLI wrapper so bash callers (`relaunch`) don't hand-roll their own copy
     of this POST. With no `feature`, the post is forced project-scoped

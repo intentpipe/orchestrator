@@ -325,10 +325,23 @@ daemon._JOBS[:] = [
 daemon.reap_jobs(cfg, api)
 assert len(daemon._JOBS) == 1 and daemon._JOBS[0]["name"] == "running", daemon._JOBS  # unfinished stays
 texts = [t for _, t in api.sent]
-assert any(t.startswith("✅ plan for okproj finished") for t in texts), texts       # success
+# plan's ✅ carries the run's final message (the log tail) under a header that
+# names the next trigger — one message, not "done" and the task list apart.
+assert any(t.startswith("✅ planning done for okproj — 🚀 starts the loop\n\nplanned 3 tasks") for t in texts), texts
 assert any(t.startswith("😱 plan for failproj") and "boom" in t for t in texts), texts  # crash
 assert any(t.startswith("😱 plan for blockedproj") and "blocked" in t for t in texts), texts  # exit 0 but rejected
 assert len(texts) == 3, texts  # the running job posted nothing
+daemon._JOBS[:] = []
+
+# reap_jobs: unblock is the same shape (final message under its own header);
+# a loop's ✅ stays bare — its log is a transcript, not a message.
+api = FakeAPI()
+daemon._JOBS[:] = [{**_job("ub", 0, "queue is clear for 🚀"), "action": "unblock"},
+                   {**_job("lp", 0, "── task 0001 → done"), "action": "loop"}]
+daemon.reap_jobs(cfg, api)
+texts = [t for _, t in api.sent]
+assert any(t == "✅ unblock done for ub\n\nqueue is clear for 🚀" for t in texts), texts
+assert any(t == "✅ loop for lp finished." for t in texts), texts
 daemon._JOBS[:] = []
 
 # reap_jobs: a signal death is a KILL, not a crash — rc=143 (shell 128+15) and a

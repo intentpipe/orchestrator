@@ -1302,10 +1302,11 @@ def spawn_detached(cmd, cwd, base, track=None):
     return p.pid
 
 
-def _log_report(path, lines=None):
+def _log_report(path, lines=None, budget=1500):
     """(tail, rejected) for a finished run's log — tail for the reply, rejected
     True if a permission denial appears anywhere in it. `lines` caps the tail to
-    that many final lines (for the journal) instead of Telegram's byte budget."""
+    that many final lines (for the journal) instead of the byte `budget` (the
+    default leaves room for a header inside Telegram's 4096-char message)."""
     try:
         with open(path) as f:
             data = f.read()
@@ -1315,7 +1316,7 @@ def _log_report(path, lines=None):
     if lines:
         tail = "\n".join(data.splitlines()[-lines:]).strip()
     else:
-        tail = data[-1500:].strip()
+        tail = data[-budget:].strip()
     return tail or "(no output)", rejected
 
 
@@ -1444,11 +1445,23 @@ def _kill_signal(rc):
         return f"signal {n}"
 
 
+# Runs whose substance is the skill's final message (the run log's tail): the
+# daemon posts it once, with the completion signal, after the run has exited —
+# so the human reads "done" and "what was done" as one message, at the moment
+# the state is landed and the next trigger can fire. The header names that
+# trigger; the budget leaves the message under Telegram's 4096 chars.
+FINAL_MESSAGE_ACTIONS = {
+    "plan": "✅ planning done for {name} — 🚀 starts the loop",
+    "unblock": "✅ unblock done for {name}",
+}
+FINAL_MESSAGE_BUDGET = 3800
+
+
 def reap_jobs(cfg, api):
     """Poll tracked detached runs; when one finishes, reap it (no zombies) and post
-    the outcome into its topic — a concise ✅ on success, a 😱 with the log tail on
-    failure or rejection. (The run's own notify.sh still delivers the substance,
-    e.g. the task list; this is the completion signal.) Called once per poll cycle."""
+    the outcome into its topic — ✅ on success (plus the run's final message for
+    FINAL_MESSAGE_ACTIONS and report_tail runs), a 😱 with the log tail on failure
+    or rejection. Called once per poll cycle."""
     still = []
     for j in _JOBS:
         rc = j["popen"].poll()
@@ -1502,6 +1515,9 @@ def reap_jobs(cfg, api):
                 header = (f"☑️ {j['action']} for {j['name']} finished — adopted after a daemon "
                           f"restart, so its exit status is unknown")
                 done = f"{header}:\n\n{tail}"
+            elif j.get("action") in FINAL_MESSAGE_ACTIONS:
+                header = FINAL_MESSAGE_ACTIONS[j["action"]].format(name=j["name"])
+                done = f"{header}\n\n{_log_report(j['log'], budget=FINAL_MESSAGE_BUDGET)[0]}"
             elif j.get("report_tail"):   # e.g. logmine implement — surface the PR URL
                 done = f"{header}\n\n{tail}"
             api.send_message(cfg["chat_id"], done, j.get("topic"))
@@ -1528,9 +1544,9 @@ def reap_jobs(cfg, api):
 
 
 def dispatch(action, entry, cfg, api, thread_id, react, fail, reply_channel=None):
-    """Launch a trigger's process. 👌 means STARTED; the run's own notify.sh
-    delivers the substance, and reap_jobs posts the completion signal — ✅ on
-    success, 😱 + log tail if it fails or is rejected. `reply_channel` is a
+    """Launch a trigger's process. 👌 means STARTED; reap_jobs posts the outcome
+    when it exits — ✅ with the run's final message (plan, unblock) or a bare ✅,
+    😱 + log tail if it fails or is rejected. `reply_channel` is a
     Quorum job ticket's own `reply_to.channel` (task 0069/0071): when a run was
     asked for there, reap_jobs honours it outright instead of guessing the
     destination from the completion message."""
